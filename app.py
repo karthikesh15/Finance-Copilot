@@ -1,9 +1,13 @@
 import os
+import logging
 import requests
 from flask import Flask, request
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -12,12 +16,12 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-    print("Incoming update:", data)
+    logger.info(f"Incoming update: {data}")
 
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
-        print(f"Message from {chat_id}: {text}")
+        logger.info(f"Message from {chat_id}: {text}")
 
         requests.post(f"{TELEGRAM_API}/sendMessage", json={
             "chat_id": chat_id,
