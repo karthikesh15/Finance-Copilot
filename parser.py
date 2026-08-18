@@ -4,7 +4,7 @@ from groq import Groq
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# LLM Text Parser (Uses llama3-70b-8192 or llama-3.1-8b-instant for fast parsing)
+# 1. Text Parser using groq/compound-mini
 def parse_transaction_text(text_input):
     prompt = f"""
     Extract financial transaction details from this message into strict JSON:
@@ -17,21 +17,21 @@ def parse_transaction_text(text_input):
         "category": "string",
         "vendor_customer": "string"
     }}
-    Respond ONLY with raw valid JSON, no markdown formatting.
+    Respond ONLY with raw valid JSON object, no markdown formatting or commentary.
     """
     response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",  # Updated to highly available fast production model
+        model="groq/compound-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
         response_format={"type": "json_object"}
     )
     return json.loads(response.choices[0].message.content)
 
-# OCR Vision Parser (Uses llama-3.2-11b-vision-preview or qwen/qwen3.6-27b)
+# 2. Receipt OCR Parser using groq/compound-mini
 def parse_receipt_image(image_base64):
-    prompt = "Extract details from this receipt image: type ('inflow'/'outflow'), amount (float), category, vendor_customer. Respond in strict JSON."
+    prompt = "Extract transaction details from this receipt image: type ('inflow'/'outflow'), amount (float), category, vendor_customer. Respond ONLY in strict valid JSON."
     response = groq_client.chat.completions.create(
-        model="llama-3.2-11b-vision-preview",
+        model="groq/compound-mini",
         messages=[{
             "role": "user",
             "content": [
@@ -44,7 +44,7 @@ def parse_receipt_image(image_base64):
     )
     return json.loads(response.choices[0].message.content)
 
-# Voice Note Transcription via Groq Whisper
+# 3. Voice Note Transcription using whisper-large-v3-turbo
 def transcribe_voice_note(file_bytes):
     temp_path = "temp_voice.ogg"
     with open(temp_path, "wb") as f:
