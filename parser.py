@@ -7,17 +7,24 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # 1. Text Parser using groq/compound-mini
 def parse_transaction_text(text_input):
     prompt = f"""
-    Extract financial transaction details from this message into strict JSON:
-    "{text_input}"
+    You are an expert financial bookkeeper. Extract transaction details from the message below into strict JSON.
 
-    Expected JSON format:
+    Rules for tricky inputs:
+    1. Focus ONLY on actual money spent or received (the change in balance), not starting/ending balances.
+    2. If multiple numbers exist, extract the specific expense or income value.
+    3. Default to "outflow" unless money coming in is explicitly stated (e.g., "got", "received", "earned", "salary").
+    4. Normalize categories into clean standard names (e.g., Food, Travel, Utilities, Income, Shopping).
+
+    Message: "{text_input}"
+
+    Expected JSON schema:
     {{
         "type": "inflow" or "outflow",
-        "amount": 0.0,
+        "amount": float,
         "category": "string",
         "vendor_customer": "string"
     }}
-    Respond ONLY with raw valid JSON object, no markdown formatting or commentary.
+    Respond ONLY with valid JSON.
     """
     response = groq_client.chat.completions.create(
         model="groq/compound-mini",
