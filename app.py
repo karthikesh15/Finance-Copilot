@@ -4,6 +4,7 @@ import base64
 import requests
 from flask import Flask, request
 from dotenv import load_dotenv
+from flask import send_file
 
 from database import init_db, add_transaction, get_cash_summary
 from parser import parse_transaction_text, parse_receipt_image, transcribe_voice_note
@@ -73,6 +74,12 @@ def webhook():
         send_reply(chat_id, "⚠️ Failed to process input. Please try again.")
 
     return "OK", 200
+
+@app.route("/download-db", methods=["GET"])
+def download_db():
+    if os.path.exists("ledger.db"):
+        return send_file("ledger.db", as_attachment=True)
+    return "Database file not found on server yet.", 404
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
