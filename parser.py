@@ -1,10 +1,10 @@
+# parser.py
 import os
 import json
 from groq import Groq
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# LLM Text Parser via Groq (llama-3.3-70b-versatile)
 def parse_transaction_text(text_input):
     prompt = f"""
     Extract financial transaction details from this message into strict JSON:
@@ -17,7 +17,7 @@ def parse_transaction_text(text_input):
         "category": "string",
         "vendor_customer": "string"
     }}
-    Respond ONLY with raw valid JSON, no markdown formatting.
+    Respond ONLY with raw valid JSON.
     """
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -27,9 +27,8 @@ def parse_transaction_text(text_input):
     )
     return json.loads(response.choices[0].message.content)
 
-# OCR Vision Parser via Groq Vision (llama-3.2-11b-vision-preview)
 def parse_receipt_image(image_base64):
-    prompt = "Extract details from this receipt image: type ('inflow'/'outflow'), amount (float), category, vendor_customer. Respond in JSON."
+    prompt = "Extract details from this receipt: type ('inflow'/'outflow'), amount (float), category, vendor_customer. Return ONLY strict JSON object."
     response = groq_client.chat.completions.create(
         model="llama-3.2-11b-vision-preview",
         messages=[{
@@ -44,7 +43,6 @@ def parse_receipt_image(image_base64):
     )
     return json.loads(response.choices[0].message.content)
 
-# Voice Note Transcription
 def transcribe_voice_note(file_bytes):
     temp_path = "temp_voice.ogg"
     with open(temp_path, "wb") as f:
