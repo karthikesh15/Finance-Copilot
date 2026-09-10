@@ -2,7 +2,7 @@ import os
 import logging
 import base64
 import requests
-from flask import Flask, request
+from flask import Flask, request, send_file
 from dotenv import load_dotenv
 
 from database import init_db, add_transaction, get_cash_summary, get_category_breakdown, get_source_breakdown
@@ -31,6 +31,15 @@ CATEGORY_CONFIG = {
     "Others":    ("✏️ Others",    None),
 }
 
+DOWNLOAD_SECRET = os.getenv("DOWNLOAD_SECRET")
+
+@app.route("/download-db")
+def download_db():
+    key = request.args.get("key")
+    if key != DOWNLOAD_SECRET:
+        return "Unauthorized", 403
+    return send_file("ledger.db", as_attachment=True)
+    
 def send_reply(chat_id, text):
     requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
 
