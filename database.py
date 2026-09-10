@@ -13,7 +13,6 @@ def init_db():
             amount REAL NOT NULL,
             category TEXT,
             subcategory TEXT,
-            vendor_customer TEXT,
             description TEXT,
             source TEXT CHECK(source IN ('text', 'photo', 'voice', 'button')),
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -22,14 +21,14 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_transaction(user_id, tx_type, amount, category, vendor_customer,
+def add_transaction(user_id, tx_type, amount, category,
                      subcategory=None, description=None, source="text"):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO transactions (user_id, type, amount, category, subcategory, vendor_customer, description, source)
+        INSERT INTO transactions (user_id, type, amount, category, subcategory, description, source)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, tx_type, amount, category, subcategory, vendor_customer, description, source))
+    ''', (user_id, tx_type, amount, category, subcategory, description, source))
     conn.commit()
     conn.close()
 
