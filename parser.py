@@ -37,7 +37,7 @@ Respond ONLY with raw valid JSON in this exact format, no markdown, no explanati
 }}
 """
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="groq/compound-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
         response_format={"type": "json_object"}
@@ -59,7 +59,7 @@ Return JSON with:
 Respond ONLY with raw valid JSON, no markdown.
 """
     response = groq_client.chat.completions.create(
-        model="llama-3.2-11b-vision-preview",
+        model="groq/compound-mini",
         messages=[{
             "role": "user",
             "content": [
