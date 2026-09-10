@@ -27,7 +27,7 @@ def add_transaction(user_id, tx_type, amount, category,
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO transactions (user_id, type, amount, category, subcategory, description, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     ''', (user_id, tx_type, amount, category, subcategory, description, source))
     conn.commit()
     conn.close()
