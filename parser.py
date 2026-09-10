@@ -44,8 +44,6 @@ Rules:
   "5k" (=5000), "2.5k" (=2500), "$20", or plain numbers.
 - "category" must be exactly ONE of: {", ".join(CATEGORIES)}. If nothing fits clearly, use "Others".
 - "subcategory" is a short, more specific label if useful (e.g. "rice" under "Sales"), else null.
-- "vendor_customer" is the person or business involved (e.g. "Ramesh", "ABC Traders").
-  Use "Unknown" if not mentioned.
 - "description" is a short 5-10 word plain-English summary of the transaction.
 - If the message describes multiple transactions, extract only the FIRST/PRIMARY one.
 
@@ -55,7 +53,6 @@ Respond ONLY with raw valid JSON in this exact format, no markdown, no explanati
     "amount": 0.0,
     "category": "one of the categories above",
     "subcategory": "string or null",
-    "vendor_customer": "string",
     "description": "string"
 }}
 """
@@ -84,11 +81,9 @@ Read the bill carefully and reason step by step internally (but output only the 
    and add any tax percentage shown. Do not confuse an item's price or a tax percentage with the total.
 4. For "category": infer from the item names as a group (e.g. drinks/cake/biscuits → "Food";
    hardware/materials → "Supplies"; etc). Choose exactly one of: {", ".join(CATEGORIES)}.
-5. For "vendor_customer": use a printed/written store name or letterhead if visible. If this looks like
-   a personal handwritten note with no business name, use "Unknown" rather than guessing a name.
-6. For "description": summarize the actual items bought/sold in a few words, e.g.
+5. For "description": summarize the actual items bought/sold in a few words, e.g.
    "Sparkling cold brew, banana cake, almond biscuit" — list the real item names you read, not generic terms.
-7. For "subcategory": one short label representing the main item type, or null.
+6. For "subcategory": one short label representing the main item type, or null.
 
 If handwriting is partially illegible, make your best reasonable estimate rather than refusing —
 this is for informal bookkeeping, not legal accuracy. Always return a complete JSON object.
@@ -98,7 +93,6 @@ Respond ONLY with raw valid JSON, no markdown, no explanation:
     "amount": 0.0,
     "category": "one of the categories above",
     "subcategory": "string or null",
-    "vendor_customer": "string",
     "description": "string"
 }}
 """
@@ -124,7 +118,6 @@ def analyze_receipt_image_safe(image_base64, known_type):
             "amount": amount,
             "category": category,
             "subcategory": result.get("subcategory"),
-            "vendor_customer": result.get("vendor_customer") or "Unknown",
             "description": result.get("description") or "Extracted from receipt image",
             "needs_review": amount == 0.0
         }
@@ -134,7 +127,6 @@ def analyze_receipt_image_safe(image_base64, known_type):
             "amount": 0.0,
             "category": "Others",
             "subcategory": None,
-            "vendor_customer": "Unknown",
             "description": "⚠️ Could not auto-read this receipt — please edit manually",
             "needs_review": True
         }
