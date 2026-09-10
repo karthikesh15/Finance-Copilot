@@ -1,10 +1,33 @@
 import os
+import re
 import json
 from groq import Groq
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 CATEGORIES = ["Sales", "Supplies", "Wages", "Rent", "Utilities", "Transport", "Food", "Others"]
+
+
+def extract_json(raw_text):
+    match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON object found in model output: {raw_text[:200]}")
+    return json.loads(match.group(0))
+
+
+def safe_chat_call(messages, model, use_json_mode=True):
+    try:
+        kwargs = {"model": model, "messages": messages, "temperature": 0.1}
+        if use_json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = groq_client.chat.completions.create(**kwargs)
+        return json.loads(response.choices[0].message.content)
+    except Exception:
+        response = groq_client.chat.completions.create(
+            model=model, messages=messages, temperature=0.1
+        )
+        return extract_json(response.choices[0].message.content)
+
 
 def parse_transaction_text(text_input):
     prompt = f"""
@@ -36,37 +59,37 @@ Respond ONLY with raw valid JSON in this exact format, no markdown, no explanati
     "description": "string"
 }}
 """
-    response = groq_client.chat.completions.create(
-        model="groq/compound-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.1,
-        response_format={"type": "json_object"}
-    )
-    return json.loads(response.choices[0].message.content)
+    messages = [{"role": "user", "content": prompt}]
+    return safe_chat_call(messages, model="groq/compound-mini")
 
 
-def parse_receipt_image(image_base64):
+def parse_receipt_image(image_base64, known_type):
     prompt = f"""
-You are extracting transaction data from a receipt image for a small business ledger.
-The receipt may be computer-printed OR handwritten, and may be low quality, tilted, or partially unclear.
+You are an expert at reading receipts for a small business ledger — computer-printed OR handwritten,
+possibly low quality, tilted, or partially unclear.
 
-Read carefully and extract:
-- "type": "inflow" (this is a sales receipt / money received) or "outflow" (this is a purchase / money spent).
-  Most receipts a shopkeeper photographs are sales they made, so default to "inflow" unless it's
-  clearly their own purchase receipt.
-- "amount": the FINAL TOTAL amount (float). Look for words like "Total", "Grand Total", "Net Payable",
-  or the largest/last amount if no total is labeled. Ignore subtotal/tax lines if a final total exists.
-- "category": one of {", ".join(CATEGORIES)}. Infer from item names or store type if not obvious.
-- "subcategory": short specific label (e.g. main item purchased), or null.
-- "vendor_customer": the store/shop/business name printed or written on the receipt. Use "Unknown" if illegible.
-- "description": short 5-10 word summary of what the receipt shows.
+The transaction TYPE is already known: "{known_type}". Do not try to determine type — focus only on
+the fields below, and use careful visual reasoning even when details aren't explicitly labeled.
 
-If the receipt is handwritten and partially illegible, make your best reasonable estimate rather than
-refusing — this is for informal bookkeeping, not legal accuracy.
+Think it through like this:
+- Look at item names/rows to figure out the QUANTITY and TITLE of what was bought/sold, even if there's
+  no "Qty" column — e.g. "Rice 2 x 50" implies quantity 2 at unit price 50. If only a total is visible
+  with no breakdown, infer the most likely single item from context (shop type, item names visible).
+- Find the AMOUNT: prefer a labeled "Total"/"Grand Total"/"Net Payable" figure. If no total is labeled,
+  sum the visible line items, or use the largest clearly-legible number if math isn't possible.
+- Infer the CATEGORY from the item names or the store name/type (e.g. a hardware store implies
+  "Supplies", a food stall implies "Food"). Choose exactly one of: {", ".join(CATEGORIES)}.
+  Use "Others" only if truly nothing suggests a category.
+- Infer VENDOR/CUSTOMER from any store name, letterhead, signature, or handwriting on the receipt.
+  If genuinely nothing is visible, use "Unknown" — but check corners and headers carefully first.
+- Write a "description" that reflects what you inferred, not just what was printed — e.g.
+  "2kg rice and 1 bag flour from grocery store" even if those exact words don't appear.
+
+This is for informal bookkeeping, not legal accuracy — always make your best reasonable estimate
+rather than refusing, and always return a complete JSON object with every field filled.
 
 Respond ONLY with raw valid JSON, no markdown, no explanation:
 {{
-    "type": "inflow" or "outflow",
     "amount": 0.0,
     "category": "one of the categories above",
     "subcategory": "string or null",
@@ -74,19 +97,42 @@ Respond ONLY with raw valid JSON, no markdown, no explanation:
     "description": "string"
 }}
 """
-    response = groq_client.chat.completions.create(
-        model="qwen/qwen3.6-27b",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
-            ]
-        }],
-        temperature=0.1,
-        response_format={"type": "json_object"}
-    )
-    return json.loads(response.choices[0].message.content)
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+        ]
+    }]
+    return safe_chat_call(messages, model="qwen/qwen3.6-27b")
+
+
+def analyze_receipt_image_safe(image_base64, known_type):
+    try:
+        result = parse_receipt_image(image_base64, known_type)
+        amount = float(result.get("amount", 0) or 0)
+        category = result.get("category") or "Others"
+        if category not in CATEGORIES:
+            category = "Others"
+        return {
+            "type": known_type,
+            "amount": amount,
+            "category": category,
+            "subcategory": result.get("subcategory"),
+            "vendor_customer": result.get("vendor_customer") or "Unknown",
+            "description": result.get("description") or "Extracted from receipt image",
+            "needs_review": amount == 0.0
+        }
+    except Exception:
+        return {
+            "type": known_type,
+            "amount": 0.0,
+            "category": "Others",
+            "subcategory": None,
+            "vendor_customer": "Unknown",
+            "description": "⚠️ Could not auto-read this receipt — please edit manually",
+            "needs_review": True
+        }
 
 
 def transcribe_voice_note(file_bytes):
