@@ -109,7 +109,7 @@ Respond ONLY with raw valid JSON, no markdown, no explanation:
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
         ]
     }]
-    return safe_chat_call(messages, model="qwen/qwen3.6-27b")
+    return safe_chat_call(messages, model="qwen/qwen3.8-27b")
 
 
 def analyze_receipt_image_safe(image_base64, known_type):
