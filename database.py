@@ -62,3 +62,17 @@ def get_category_breakdown(user_id):
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+def get_source_breakdown(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT source, COUNT(*) as count
+        FROM transactions
+        WHERE user_id = ?
+        GROUP BY source
+        ORDER BY count DESC
+    ''', (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
