@@ -74,7 +74,6 @@ def format_structured_reply(parsed, source_label):
         f"{arrow} Type: {parsed['type'].capitalize()}",
         f"💵 Amount: {parsed['amount']}",
         f"📁 Category: {parsed['category']}",
-        f"🏷️ Vendor/Customer: {parsed.get('vendor_customer', 'Unknown')}",
         f"📝 Note: {parsed.get('description', '-')}"
     ]
     if parsed.get("needs_review"):
@@ -82,8 +81,8 @@ def format_structured_reply(parsed, source_label):
         lines.append("⚠️ Amount could not be confidently read — please verify and correct if needed.")
     return "\n".join(lines)
 
-def log_and_continue(chat_id, category, amount, tx_type, source, description=None, vendor_customer="Unknown"):
-    add_transaction(chat_id, tx_type, amount, category, vendor_customer,
+def log_and_continue(chat_id, category, amount, tx_type, source, description=None):
+    add_transaction(chat_id, tx_type, amount, category,
                      description=description, source=source)
     show_main_menu(chat_id)
 
@@ -118,8 +117,7 @@ def webhook():
                 send_reply(chat_id, "⚠️ Please enter a valid number for the amount.")
                 return "OK", 200
             parsed = {
-                "type": session["type"], "amount": amount, "category": session["category"],
-                "vendor_customer": "Unknown", "description": None
+                "type": session["type"], "amount": amount, "category": session["category"], "description": None
             }
             send_reply(chat_id, format_structured_reply(parsed, "📝 Options"))
             log_and_continue(chat_id, session["category"], amount, session["type"], source="button")
@@ -131,7 +129,6 @@ def webhook():
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="text", description=parsed.get("description"),
-                vendor_customer=parsed.get("vendor_customer", "Unknown")
             )
             return "OK", 200
 
@@ -145,7 +142,6 @@ def webhook():
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="photo", description=parsed.get("description"),
-                vendor_customer=parsed.get("vendor_customer", "Unknown")
             )
             return "OK", 200
 
@@ -159,7 +155,6 @@ def webhook():
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="voice", description=parsed.get("description"),
-                vendor_customer=parsed.get("vendor_customer", "Unknown")
             )
             return "OK", 200
 
@@ -169,7 +164,6 @@ def webhook():
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="text", description=parsed.get("description"),
-                vendor_customer=parsed.get("vendor_customer", "Unknown")
             )
             return "OK", 200
 
@@ -188,7 +182,6 @@ def webhook():
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="voice", description=parsed.get("description"),
-                vendor_customer=parsed.get("vendor_customer", "Unknown")
             )
             return "OK", 200
 
