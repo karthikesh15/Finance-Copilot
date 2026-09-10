@@ -62,31 +62,36 @@ Respond ONLY with raw valid JSON in this exact format, no markdown, no explanati
     messages = [{"role": "user", "content": prompt}]
     return safe_chat_call(messages, model="groq/compound-mini")
 
-
 def parse_receipt_image(image_base64, known_type):
     prompt = f"""
-You are an expert at reading receipts for a small business ledger — computer-printed OR handwritten,
-possibly low quality, tilted, or partially unclear.
+You are an expert at reading receipts and handwritten bills for a small business ledger.
+The image may contain a computer-printed OR handwritten bill, possibly with MULTIPLE line items,
+a quantity column, a tax line, and a final total. The image may ALSO contain unrelated handwritten
+content nearby (math notes, doodles, diagrams, equations, scribbles) — you must IGNORE anything that
+is not clearly part of the itemized bill/receipt.
 
-The transaction TYPE is already known: "{known_type}". Do not try to determine type — focus only on
-the fields below, and use careful visual reasoning even when details aren't explicitly labeled.
+The transaction TYPE is already known: "{known_type}". Do not try to determine type.
 
-Think it through like this:
-- Look at item names/rows to figure out the QUANTITY and TITLE of what was bought/sold, even if there's
-  no "Qty" column — e.g. "Rice 2 x 50" implies quantity 2 at unit price 50. If only a total is visible
-  with no breakdown, infer the most likely single item from context (shop type, item names visible).
-- Find the AMOUNT: prefer a labeled "Total"/"Grand Total"/"Net Payable" figure. If no total is labeled,
-  sum the visible line items, or use the largest clearly-legible number if math isn't possible.
-- Infer the CATEGORY from the item names or the store name/type (e.g. a hardware store implies
-  "Supplies", a food stall implies "Food"). Choose exactly one of: {", ".join(CATEGORIES)}.
-  Use "Others" only if truly nothing suggests a category.
-- Infer VENDOR/CUSTOMER from any store name, letterhead, signature, or handwriting on the receipt.
-  If genuinely nothing is visible, use "Unknown" — but check corners and headers carefully first.
-- Write a "description" that reflects what you inferred, not just what was printed — e.g.
-  "2kg rice and 1 bag flour from grocery store" even if those exact words don't appear.
+Read the bill carefully and reason step by step internally (but output only the final JSON):
 
-This is for informal bookkeeping, not legal accuracy — always make your best reasonable estimate
-rather than refusing, and always return a complete JSON object with every field filled.
+1. Identify ONLY the rows that belong to the itemized bill — usually a list of item names, each with
+   a quantity and a price, possibly followed by a tax percentage and a final total line
+   (labels like "Total", "Rounded off Invoice Amount", "Net Payable", "Grand Total").
+2. Ignore any numbers, letters, diagrams, or notes elsewhere in the image that are not part of this
+   itemized list — e.g. unrelated math problems, geometry sketches, random calculations, doodles.
+3. For "amount": if a final total/invoice-amount line is present, use that exact figure — it already
+   includes tax. If no final total is given, sum the item prices (accounting for quantity if shown)
+   and add any tax percentage shown. Do not confuse an item's price or a tax percentage with the total.
+4. For "category": infer from the item names as a group (e.g. drinks/cake/biscuits → "Food";
+   hardware/materials → "Supplies"; etc). Choose exactly one of: {", ".join(CATEGORIES)}.
+5. For "vendor_customer": use a printed/written store name or letterhead if visible. If this looks like
+   a personal handwritten note with no business name, use "Unknown" rather than guessing a name.
+6. For "description": summarize the actual items bought/sold in a few words, e.g.
+   "Sparkling cold brew, banana cake, almond biscuit" — list the real item names you read, not generic terms.
+7. For "subcategory": one short label representing the main item type, or null.
+
+If handwriting is partially illegible, make your best reasonable estimate rather than refusing —
+this is for informal bookkeeping, not legal accuracy. Always return a complete JSON object.
 
 Respond ONLY with raw valid JSON, no markdown, no explanation:
 {{
