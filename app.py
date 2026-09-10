@@ -6,7 +6,7 @@ from flask import Flask, request
 from dotenv import load_dotenv
 
 from database import init_db, add_transaction, get_cash_summary, get_category_breakdown, get_source_breakdown
-from parser import parse_transaction_text, parse_receipt_image, transcribe_voice_note
+from parser import parse_transaction_text, analyze_receipt_image_safe, transcribe_voice_note
 
 load_dotenv()
 init_db()
@@ -62,16 +62,25 @@ def show_category_menu(chat_id):
     buttons = [(label, f"cat_{key}") for key, (label, _) in CATEGORY_CONFIG.items()]
     send_keyboard(chat_id, "Select a category:", buttons)
 
+def show_photo_type_menu(chat_id):
+    SESSIONS[chat_id] = {"step": "photo_type"}
+    send_keyboard(chat_id, "Is this receipt an inflow or outflow?",
+                  [("📈 Inflow", "phototype_inflow"), ("📉 Outflow", "phototype_outflow")])
+
 def format_structured_reply(parsed, source_label):
     arrow = "📈" if parsed["type"] == "inflow" else "📉"
-    return (
-        f"{source_label} — Transaction Logged\n"
-        f"{arrow} Type: {parsed['type'].capitalize()}\n"
-        f"💵 Amount: {parsed['amount']}\n"
-        f"📁 Category: {parsed['category']}\n"
-        f"🏷️ Vendor/Customer: {parsed.get('vendor_customer', 'Unknown')}\n"
+    lines = [
+        f"{source_label} — Transaction Logged",
+        f"{arrow} Type: {parsed['type'].capitalize()}",
+        f"💵 Amount: {parsed['amount']}",
+        f"📁 Category: {parsed['category']}",
+        f"🏷️ Vendor/Customer: {parsed.get('vendor_customer', 'Unknown')}",
         f"📝 Note: {parsed.get('description', '-')}"
-    )
+    ]
+    if parsed.get("needs_review"):
+        lines.append("")
+        lines.append("⚠️ Amount could not be confidently read — please verify and correct if needed.")
+    return "\n".join(lines)
 
 def log_and_continue(chat_id, category, amount, tx_type, source, description=None, vendor_customer="Unknown"):
     add_transaction(chat_id, tx_type, amount, category, vendor_customer,
@@ -102,7 +111,6 @@ def webhook():
             send_detailed_summary(chat_id)
             return "OK", 200
 
-        # Amount typed after category selection (Options flow)
         if session and session.get("step") == "amount" and "text" in msg:
             try:
                 amount = float(msg["text"].replace(",", "").strip())
@@ -117,7 +125,6 @@ def webhook():
             log_and_continue(chat_id, session["category"], amount, session["type"], source="button")
             return "OK", 200
 
-        # Free-text sentence after choosing "Others" in Options flow
         if session and session.get("step") == "others_text" and "text" in msg:
             parsed = parse_transaction_text(msg["text"])
             send_reply(chat_id, format_structured_reply(parsed, "📝 Options (Others)"))
@@ -128,12 +135,12 @@ def webhook():
             )
             return "OK", 200
 
-        # Waiting for a photo after "menu_photo" was tapped
         if session and session.get("step") == "awaiting_photo" and "photo" in msg:
+            known_type = session.get("photo_type", "outflow")
             file_id = msg["photo"][-1]["file_id"]
             img_bytes = download_telegram_file(file_id)
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-            parsed = parse_receipt_image(img_b64)
+            parsed = analyze_receipt_image_safe(img_b64, known_type)
             send_reply(chat_id, format_structured_reply(parsed, "📷 Photo"))
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
@@ -142,7 +149,6 @@ def webhook():
             )
             return "OK", 200
 
-        # Waiting for a voice note after "menu_voice" was tapped
         if session and session.get("step") == "awaiting_voice" and "voice" in msg:
             file_id = msg["voice"]["file_id"]
             voice_bytes = download_telegram_file(file_id)
@@ -157,7 +163,6 @@ def webhook():
             )
             return "OK", 200
 
-        # Fallback: user sends free text without going through menu at all
         if "text" in msg:
             parsed = parse_transaction_text(msg["text"])
             send_reply(chat_id, format_structured_reply(parsed, "📝 Text"))
@@ -168,21 +173,11 @@ def webhook():
             )
             return "OK", 200
 
-        # Fallback: user sends a photo without tapping "Photo" first
         if "photo" in msg:
-            file_id = msg["photo"][-1]["file_id"]
-            img_bytes = download_telegram_file(file_id)
-            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-            parsed = parse_receipt_image(img_b64)
-            send_reply(chat_id, format_structured_reply(parsed, "📷 Photo"))
-            log_and_continue(
-                chat_id, parsed["category"], parsed["amount"], parsed["type"],
-                source="photo", description=parsed.get("description"),
-                vendor_customer=parsed.get("vendor_customer", "Unknown")
-            )
+            show_photo_type_menu(chat_id)
+            send_reply(chat_id, "📷 Got your photo — first tell me: inflow or outflow? Then resend the photo.")
             return "OK", 200
 
-        # Fallback: user sends a voice note without tapping "Voice" first
         if "voice" in msg:
             file_id = msg["voice"]["file_id"]
             voice_bytes = download_telegram_file(file_id)
@@ -199,7 +194,7 @@ def webhook():
 
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
-        send_reply(chat_id, "⚠️ Failed to process input. Please try again.")
+        send_reply(chat_id, "⚠️ Something went wrong, but nothing was lost. Please try again.")
         show_main_menu(chat_id)
 
     return "OK", 200
@@ -216,13 +211,18 @@ def handle_callback(query):
         return "OK", 200
 
     if data == "menu_photo":
-        SESSIONS[chat_id] = {"step": "awaiting_photo"}
-        send_reply(chat_id, "📷 Send a photo of the receipt.")
+        show_photo_type_menu(chat_id)
         return "OK", 200
 
     if data == "menu_voice":
         SESSIONS[chat_id] = {"step": "awaiting_voice"}
         send_reply(chat_id, "🎙️ Send a voice note describing the transaction.")
+        return "OK", 200
+
+    if data in ("phototype_inflow", "phototype_outflow"):
+        tx_type = "inflow" if data == "phototype_inflow" else "outflow"
+        SESSIONS[chat_id] = {"step": "awaiting_photo", "photo_type": tx_type}
+        send_reply(chat_id, f"📷 Got it — {tx_type}. Now send the receipt photo.")
         return "OK", 200
 
     session = SESSIONS.get(chat_id)
