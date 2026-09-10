@@ -47,19 +47,35 @@ Respond ONLY with raw valid JSON in this exact format, no markdown, no explanati
 
 def parse_receipt_image(image_base64):
     prompt = f"""
-Extract transaction details from this receipt image.
-Return JSON with:
-- "type": "inflow" or "outflow" (assume "outflow" unless it's clearly a sales receipt/refund)
-- "amount": float, total amount on the receipt
-- "category": one of {", ".join(CATEGORIES)}
-- "subcategory": short specific label or null
-- "vendor_customer": the store/business name on the receipt, or "Unknown"
-- "description": short summary of what was purchased/sold
+You are extracting transaction data from a receipt image for a small business ledger.
+The receipt may be computer-printed OR handwritten, and may be low quality, tilted, or partially unclear.
 
-Respond ONLY with raw valid JSON, no markdown.
+Read carefully and extract:
+- "type": "inflow" (this is a sales receipt / money received) or "outflow" (this is a purchase / money spent).
+  Most receipts a shopkeeper photographs are sales they made, so default to "inflow" unless it's
+  clearly their own purchase receipt.
+- "amount": the FINAL TOTAL amount (float). Look for words like "Total", "Grand Total", "Net Payable",
+  or the largest/last amount if no total is labeled. Ignore subtotal/tax lines if a final total exists.
+- "category": one of {", ".join(CATEGORIES)}. Infer from item names or store type if not obvious.
+- "subcategory": short specific label (e.g. main item purchased), or null.
+- "vendor_customer": the store/shop/business name printed or written on the receipt. Use "Unknown" if illegible.
+- "description": short 5-10 word summary of what the receipt shows.
+
+If the receipt is handwritten and partially illegible, make your best reasonable estimate rather than
+refusing — this is for informal bookkeeping, not legal accuracy.
+
+Respond ONLY with raw valid JSON, no markdown, no explanation:
+{{
+    "type": "inflow" or "outflow",
+    "amount": 0.0,
+    "category": "one of the categories above",
+    "subcategory": "string or null",
+    "vendor_customer": "string",
+    "description": "string"
+}}
 """
     response = groq_client.chat.completions.create(
-        model="groq/compound-mini",
+        model="qwen/qwen3.6-27b",
         messages=[{
             "role": "user",
             "content": [
