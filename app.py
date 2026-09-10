@@ -67,6 +67,10 @@ def show_photo_type_menu(chat_id):
     send_keyboard(chat_id, "Is this receipt an inflow or outflow?",
                   [("📈 Inflow", "phototype_inflow"), ("📉 Outflow", "phototype_outflow")])
 
+def format_short_reply(parsed):
+    arrow = "📈" if parsed["type"] == "inflow" else "📉"
+    return f"✅ Transaction logged: {arrow} {parsed['type'].capitalize()} ₹{parsed['amount']} ({parsed['category']})"
+
 def format_structured_reply(parsed, source_label):
     arrow = "📈" if parsed["type"] == "inflow" else "📉"
     lines = [
@@ -119,13 +123,13 @@ def webhook():
             parsed = {
                 "type": session["type"], "amount": amount, "category": session["category"], "description": None
             }
-            send_reply(chat_id, format_structured_reply(parsed, "📝 Options"))
+            send_reply(chat_id, format_short_reply(parsed))
             log_and_continue(chat_id, session["category"], amount, session["type"], source="button")
             return "OK", 200
 
         if session and session.get("step") == "others_text" and "text" in msg:
             parsed = parse_transaction_text(msg["text"])
-            send_reply(chat_id, format_structured_reply(parsed, "📝 Options (Others)"))
+            send_reply(chat_id, format_short_reply(parsed))
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="text", description=parsed.get("description"),
@@ -160,7 +164,7 @@ def webhook():
 
         if "text" in msg:
             parsed = parse_transaction_text(msg["text"])
-            send_reply(chat_id, format_structured_reply(parsed, "📝 Text"))
+            send_reply(chat_id, format_short_reply(parsed))
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="text", description=parsed.get("description"),
