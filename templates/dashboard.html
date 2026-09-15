@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Micro-SMB Finance Copilot — Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+
+<header class="bg-gradient-to-r from-indigo-600 to-blue-600 text-white p-6 shadow-md">
+  <h1 class="text-2xl font-bold">Micro-SMB Finance Copilot</h1>
+  <p class="text-indigo-100 text-sm mt-1">Live ledger dashboard — updates automatically</p>
+</header>
+
+<main class="max-w-6xl mx-auto p-6">
+
+  <section class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+    <div class="bg-white rounded-xl shadow p-5 border-l-4 border-green-500">
+      <p class="text-gray-500 text-sm">Total Inflow</p>
+      <p id="inflow" class="text-2xl font-bold text-green-600">₹0</p>
+    </div>
+    <div class="bg-white rounded-xl shadow p-5 border-l-4 border-red-500">
+      <p class="text-gray-500 text-sm">Total Outflow</p>
+      <p id="outflow" class="text-2xl font-bold text-red-600">₹0</p>
+    </div>
+    <div class="bg-white rounded-xl shadow p-5 border-l-4 border-indigo-500">
+      <p class="text-gray-500 text-sm">Net Balance</p>
+      <p id="balance" class="text-2xl font-bold text-indigo-600">₹0</p>
+    </div>
+  </section>
+
+  <section class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+    <div class="bg-white rounded-xl shadow p-5">
+      <h2 class="font-semibold text-gray-700 mb-3">Category Breakdown</h2>
+      <canvas id="categoryChart" height="220"></canvas>
+    </div>
+    <div class="bg-white rounded-xl shadow p-5">
+      <h2 class="font-semibold text-gray-700 mb-3">Entries by Source</h2>
+      <canvas id="sourceChart" height="220"></canvas>
+    </div>
+  </section>
+
+  <section class="bg-white rounded-xl shadow p-5">
+    <h2 class="font-semibold text-gray-700 mb-3">Recent Transactions</h2>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm text-left">
+        <thead class="text-gray-500 border-b">
+          <tr>
+            <th class="py-2 pr-4">Time</th>
+            <th class="py-2 pr-4">Type</th>
+            <th class="py-2 pr-4">Amount</th>
+            <th class="py-2 pr-4">Category</th>
+            <th class="py-2 pr-4">Source</th>
+            <th class="py-2 pr-4">Note</th>
+          </tr>
+        </thead>
+        <tbody id="txTableBody" class="divide-y"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="text-center text-gray-400 text-xs mt-6">Auto-refreshing every 8 seconds</p>
+</main>
+
+<script>
+const chatId = "{{ chat_id }}";
+let categoryChart, sourceChart;
+
+async function loadData() {
+  const res = await fetch(`/api/summary/${chatId}`);
+  const data = await res.json();
+
+  document.getElementById("inflow").innerText = `₹${data.inflow.toFixed(2)}`;
+  document.getElementById("outflow").innerText = `₹${data.outflow.toFixed(2)}`;
+  document.getElementById("balance").innerText = `₹${data.balance.toFixed(2)}`;
+
+  const catLabels = data.category_breakdown.map(c => `${c.category} (${c.type})`);
+  const catValues = data.category_breakdown.map(c => c.total);
+  const catColors = data.category_breakdown.map(c => c.type === "inflow" ? "#22c55e" : "#ef4444");
+
+  if (categoryChart) categoryChart.destroy();
+  categoryChart = new Chart(document.getElementById("categoryChart"), {
+    type: "bar",
+    data: { labels: catLabels, datasets: [{ label: "Amount", data: catValues, backgroundColor: catColors }] },
+    options: { responsive: true, plugins: { legend: { display: false } } }
+  });
+
+  const srcLabels = data.source_breakdown.map(s => s.source);
+  const srcValues = data.source_breakdown.map(s => s.count);
+
+  if (sourceChart) sourceChart.destroy();
+  sourceChart = new Chart(document.getElementById("sourceChart"), {
+    type: "doughnut",
+    data: { labels: srcLabels, datasets: [{ data: srcValues, backgroundColor: ["#6366f1", "#f59e0b", "#10b981", "#ec4899"] }] },
+    options: { responsive: true }
+  });
+
+  const tbody = document.getElementById("txTableBody");
+  tbody.innerHTML = "";
+  data.transactions.forEach(tx => {
+    const row = document.createElement("tr");
+    const time = new Date(tx.timestamp).toLocaleString();
+    const typeColor = tx.type === "inflow" ? "text-green-600" : "text-red-600";
+    row.innerHTML = `
+      <td class="py-2 pr-4 text-gray-500">${time}</td>
+      <td class="py-2 pr-4 font-medium ${typeColor}">${tx.type}</td>
+      <td class="py-2 pr-4">₹${tx.amount}</td>
+      <td class="py-2 pr-4">${tx.category}</td>
+      <td class="py-2 pr-4 text-gray-500">${tx.source}</td>
+      <td class="py-2 pr-4 text-gray-500">${tx.description || "-"}</td>
+    `;
+    tbody.appendChild(row);
+  });
+}
+
+loadData();
+setInterval(loadData, 8000);
+</script>
+
+</body>
+</html>
