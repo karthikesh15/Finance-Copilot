@@ -2,10 +2,13 @@ import os
 import logging
 import base64
 import requests
-from flask import Flask, request, send_file
+from flask import Flask, request, render_template, jsonify
 from dotenv import load_dotenv
 
-from database import init_db, add_transaction, get_cash_summary, get_category_breakdown, get_source_breakdown
+from database import (
+    init_db, add_transaction, get_cash_summary,
+    get_category_breakdown, get_source_breakdown, get_all_transactions
+)
 from parser import parse_transaction_text, analyze_receipt_image_safe, transcribe_voice_note
 
 load_dotenv()
@@ -17,6 +20,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:5000")
 
 SESSIONS = {}
 
@@ -31,15 +35,28 @@ CATEGORY_CONFIG = {
     "Others":    ("Others",    None),
 }
 
-DOWNLOAD_SECRET = os.getenv("DOWNLOAD_SECRET")
 
-@app.route("/download-db")
-def download_db():
-    key = request.args.get("key")
-    if key != DOWNLOAD_SECRET:
-        return "Unauthorized", 403
-    return send_file("ledger.db", as_attachment=True)
-    
+@app.route("/dashboard/<int:chat_id>")
+def dashboard(chat_id):
+    return render_template("dashboard.html", chat_id=chat_id)
+
+
+@app.route("/api/summary/<int:chat_id>")
+def api_summary(chat_id):
+    inflow, outflow, balance = get_cash_summary(chat_id)
+    breakdown = get_category_breakdown(chat_id)
+    source_breakdown = get_source_breakdown(chat_id)
+    transactions = get_all_transactions(chat_id)
+    return jsonify({
+        "inflow": inflow,
+        "outflow": outflow,
+        "balance": balance,
+        "category_breakdown": [{"category": c, "type": t, "total": tot} for c, t, tot in breakdown],
+        "source_breakdown": [{"source": s, "count": c} for s, c in source_breakdown],
+        "transactions": transactions
+    })
+
+
 def send_reply(chat_id, text):
     requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
 
@@ -79,7 +96,6 @@ def show_photo_type_menu(chat_id):
 def format_short_reply(parsed):
     arrow = "📈" if parsed["type"] == "inflow" else "📉"
     return f"✅ Transaction logged: {arrow} {parsed['type'].capitalize()} ₹{parsed['amount']} ({parsed['category']})"
-
 
 def format_structured_reply(parsed, source_label):
     arrow = "📈" if parsed["type"] == "inflow" else "📉"
@@ -122,6 +138,11 @@ def webhook():
 
         if msg.get("text") == "/summary":
             send_detailed_summary(chat_id)
+            return "OK", 200
+
+        if msg.get("text") == "/dashboard":
+            link = f"{BASE_URL}/dashboard/{chat_id}"
+            send_reply(chat_id, f"📊 Your live dashboard: {link}")
             return "OK", 200
 
         if session and session.get("step") == "amount" and "text" in msg:
@@ -293,6 +314,9 @@ def send_detailed_summary(chat_id):
         source_labels = {"button": "Options", "text": "Text", "photo": "Photo", "voice": "Voice"}
         for source, count in source_breakdown:
             lines.append(f"{source_labels.get(source, source)}: {count} entries")
+
+    lines.append("")
+    lines.append(f"📊 Full dashboard: {BASE_URL}/dashboard/{chat_id}")
 
     send_reply(chat_id, "\n".join(lines))
 
