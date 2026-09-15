@@ -80,6 +80,7 @@ def format_short_reply(parsed):
     arrow = "📈" if parsed["type"] == "inflow" else "📉"
     return f"✅ Transaction logged: {arrow} {parsed['type'].capitalize()} ₹{parsed['amount']} ({parsed['category']})"
 
+
 def format_structured_reply(parsed, source_label):
     arrow = "📈" if parsed["type"] == "inflow" else "📉"
     lines = [
