@@ -1,77 +1,65 @@
-import sqlite3
+import os
+from supabase import create_client
 
-DB_NAME = "ledger.db"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            type TEXT CHECK(type IN ('inflow', 'outflow')),
-            amount REAL NOT NULL,
-            category TEXT,
-            subcategory TEXT,
-            description TEXT,
-            source TEXT CHECK(source IN ('text', 'photo', 'voice', 'button')),
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    pass
+
 
 def add_transaction(user_id, tx_type, amount, category,
                      subcategory=None, description=None, source="text"):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO transactions (user_id, type, amount, category, subcategory, description, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, tx_type, amount, category, subcategory, description, source))
-    conn.commit()
-    conn.close()
+    supabase.table("transactions").insert({
+        "user_id": user_id,
+        "type": tx_type,
+        "amount": amount,
+        "category": category,
+        "subcategory": subcategory,
+        "description": description,
+        "source": source
+    }).execute()
+
 
 def get_cash_summary(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT
-            SUM(CASE WHEN type='inflow' THEN amount ELSE 0 END) as total_in,
-            SUM(CASE WHEN type='outflow' THEN amount ELSE 0 END) as total_out
-        FROM transactions WHERE user_id = ?
-    ''', (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-
-    inflow = row[0] or 0.0
-    outflow = row[1] or 0.0
+    response = supabase.table("transactions").select("type, amount").eq("user_id", user_id).execute()
+    rows = response.data
+    inflow = sum(r["amount"] for r in rows if r["type"] == "inflow")
+    outflow = sum(r["amount"] for r in rows if r["type"] == "outflow")
     return inflow, outflow, (inflow - outflow)
 
+
 def get_category_breakdown(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT category, type, SUM(amount) as total
-        FROM transactions
-        WHERE user_id = ?
-        GROUP BY category, type
-        ORDER BY total DESC
-    ''', (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+    response = supabase.table("transactions").select("category, type, amount").eq("user_id", user_id).execute()
+    rows = response.data
+    breakdown = {}
+    for r in rows:
+        key = (r["category"], r["type"])
+        breakdown[key] = breakdown.get(key, 0) + r["amount"]
+    result = [(k[0], k[1], v) for k, v in breakdown.items()]
+    result.sort(key=lambda x: x[2], reverse=True)
+    return result
+
 
 def get_source_breakdown(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT source, COUNT(*) as count
-        FROM transactions
-        WHERE user_id = ?
-        GROUP BY source
-        ORDER BY count DESC
-    ''', (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+    response = supabase.table("transactions").select("source").eq("user_id", user_id).execute()
+    rows = response.data
+    counts = {}
+    for r in rows:
+        counts[r["source"]] = counts.get(r["source"], 0) + 1
+    return sorted(counts.items(), key=lambda x: x[1], reverse=True)
+
+
+def get_all_transactions(user_id, limit=200):
+    response = (
+        supabase.table("transactions")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("timestamp", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return response.data
