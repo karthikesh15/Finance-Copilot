@@ -21,14 +21,14 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 SESSIONS = {}
 
 CATEGORY_CONFIG = {
-    "Sales":     ("💰 Sales",     "inflow"),
-    "Supplies":  ("📦 Supplies",  "outflow"),
-    "Wages":     ("👷 Wages",     "outflow"),
-    "Rent":      ("🏠 Rent",      "outflow"),
-    "Utilities": ("⚡ Utilities", "outflow"),
-    "Transport": ("🚚 Transport", "outflow"),
-    "Food":      ("🍔 Food",      "outflow"),
-    "Others":    ("✏️ Others",    None),
+    "Sales":     ("Sales",     "inflow"),
+    "Supplies":  ("Supplies",  "outflow"),
+    "Wages":     ("Wages",     "outflow"),
+    "Rent":      ("Rent",      "outflow"),
+    "Utilities": ("Utilities", "outflow"),
+    "Transport": ("Transport", "outflow"),
+    "Food":      ("Food",      "outflow"),
+    "Others":    ("Others",    None),
 }
 
 DOWNLOAD_SECRET = os.getenv("DOWNLOAD_SECRET")
@@ -63,7 +63,7 @@ def download_telegram_file(file_id):
 
 def show_main_menu(chat_id):
     SESSIONS[chat_id] = {"step": "main_menu"}
-    buttons = [("📝 Options", "menu_options"), ("📷 Photo", "menu_photo"), ("🎙️ Voice", "menu_voice")]
+    buttons = [("Options", "menu_options"), ("Photo", "menu_photo"), ("Voice", "menu_voice")]
     send_keyboard(chat_id, "How would you like to log this transaction?", buttons, row_size=3)
 
 def show_category_menu(chat_id):
@@ -74,7 +74,7 @@ def show_category_menu(chat_id):
 def show_photo_type_menu(chat_id):
     SESSIONS[chat_id] = {"step": "photo_type"}
     send_keyboard(chat_id, "Is this receipt an inflow or outflow?",
-                  [("📈 Inflow", "phototype_inflow"), ("📉 Outflow", "phototype_outflow")])
+                  [("Inflow", "phototype_inflow"), ("Outflow", "phototype_outflow")])
 
 def format_short_reply(parsed):
     arrow = "📈" if parsed["type"] == "inflow" else "📉"
@@ -86,9 +86,9 @@ def format_structured_reply(parsed, source_label):
     lines = [
         f"{source_label} — Transaction Logged",
         f"{arrow} Type: {parsed['type'].capitalize()}",
-        f"💵 Amount: {parsed['amount']}",
-        f"📁 Category: {parsed['category']}",
-        f"📝 Note: {parsed.get('description', '-')}"
+        f"Amount: {parsed['amount']}",
+        f"Category: {parsed['category']}",
+        f"Note: {parsed.get('description', '-')}"
     ]
     if parsed.get("needs_review"):
         lines.append("")
@@ -116,7 +116,7 @@ def webhook():
 
     try:
         if msg.get("text") == "/start":
-            send_reply(chat_id, "👋 Welcome! Choose how you'd like to log a transaction.")
+            send_reply(chat_id, "Welcome! Choose how you'd like to log a transaction.")
             show_main_menu(chat_id)
             return "OK", 200
 
@@ -152,7 +152,7 @@ def webhook():
             img_bytes = download_telegram_file(file_id)
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
             parsed = analyze_receipt_image_safe(img_b64, known_type)
-            send_reply(chat_id, format_structured_reply(parsed, "📷 Photo"))
+            send_reply(chat_id, format_structured_reply(parsed, "Photo"))
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="photo", description=parsed.get("description"),
@@ -164,8 +164,8 @@ def webhook():
             voice_bytes = download_telegram_file(file_id)
             transcript = transcribe_voice_note(voice_bytes)
             parsed = parse_transaction_text(transcript)
-            send_reply(chat_id, f"🎙️ Heard: \"{transcript}\"")
-            send_reply(chat_id, format_structured_reply(parsed, "🎙️ Voice"))
+            send_reply(chat_id, f"Heard: \"{transcript}\"")
+            send_reply(chat_id, format_structured_reply(parsed, "Voice"))
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="voice", description=parsed.get("description"),
@@ -183,7 +183,7 @@ def webhook():
 
         if "photo" in msg:
             show_photo_type_menu(chat_id)
-            send_reply(chat_id, "📷 Got your photo — first tell me: inflow or outflow? Then resend the photo.")
+            send_reply(chat_id, "Got your photo — first tell me: inflow or outflow? Then resend the photo.")
             return "OK", 200
 
         if "voice" in msg:
@@ -191,8 +191,8 @@ def webhook():
             voice_bytes = download_telegram_file(file_id)
             transcript = transcribe_voice_note(voice_bytes)
             parsed = parse_transaction_text(transcript)
-            send_reply(chat_id, f"🎙️ Heard: \"{transcript}\"")
-            send_reply(chat_id, format_structured_reply(parsed, "🎙️ Voice"))
+            send_reply(chat_id, f"Heard: \"{transcript}\"")
+            send_reply(chat_id, format_structured_reply(parsed, "Voice"))
             log_and_continue(
                 chat_id, parsed["category"], parsed["amount"], parsed["type"],
                 source="voice", description=parsed.get("description"),
@@ -223,13 +223,13 @@ def handle_callback(query):
 
     if data == "menu_voice":
         SESSIONS[chat_id] = {"step": "awaiting_voice"}
-        send_reply(chat_id, "🎙️ Send a voice note describing the transaction.")
+        send_reply(chat_id, "Send a voice note describing the transaction.")
         return "OK", 200
 
     if data in ("phototype_inflow", "phototype_outflow"):
         tx_type = "inflow" if data == "phototype_inflow" else "outflow"
         SESSIONS[chat_id] = {"step": "awaiting_photo", "photo_type": tx_type}
-        send_reply(chat_id, f"📷 Got it — {tx_type}. Now send the receipt photo.")
+        send_reply(chat_id, f"Got it — {tx_type}. Now send the receipt photo.")
         return "OK", 200
 
     session = SESSIONS.get(chat_id)
@@ -260,12 +260,12 @@ def send_detailed_summary(chat_id):
     source_breakdown = get_source_breakdown(chat_id)
 
     lines = [
-        "📊 Cash Summary",
+        "1. Cash Summary",
         f"• Total Inflow: {inflow:.2f}",
         f"• Total Outflow: {outflow:.2f}",
         f"• Net Balance: {balance:.2f}",
         "",
-        "📁 Category Breakdown"
+        "2. Category Breakdown"
     ]
 
     if not breakdown:
@@ -279,18 +279,18 @@ def send_detailed_summary(chat_id):
         top_outflow = max((r for r in breakdown if r[1] == "outflow"), key=lambda r: r[2], default=None)
 
         lines.append("")
-        lines.append("🏆 Highlights")
+        lines.append("3. Highlights")
         if top_inflow:
             lines.append(f"Top income source: {top_inflow[0]} ({top_inflow[2]:.2f})")
         if top_outflow:
             lines.append(f"Top expense: {top_outflow[0]} ({top_outflow[2]:.2f})")
 
     lines.append("")
-    lines.append("📡 Entries by Source")
+    lines.append("Entries by Source")
     if not source_breakdown:
         lines.append("No entries yet.")
     else:
-        source_labels = {"button": "📝 Options", "text": "💬 Text", "photo": "📷 Photo", "voice": "🎙️ Voice"}
+        source_labels = {"button": "Options", "text": "Text", "photo": "Photo", "voice": "Voice"}
         for source, count in source_breakdown:
             lines.append(f"{source_labels.get(source, source)}: {count} entries")
 
