@@ -127,7 +127,7 @@ def analyze_receipt_image_safe(image_base64, known_type):
             "amount": 0.0,
             "category": "Others",
             "subcategory": None,
-            "description": "⚠️ Could not auto-read this receipt — please edit manually",
+            "description": "Could not auto-read this receipt — please edit manually",
             "needs_review": True
         }
 
