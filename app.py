@@ -119,6 +119,7 @@ def log_and_continue(chat_id, category, amount, tx_type, source, description=Non
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
+    logger.info(f"RAW INCOMING: {data}")
 
     if "callback_query" in data:
         return handle_callback(data["callback_query"])
@@ -129,18 +130,19 @@ def webhook():
     msg = data["message"]
     chat_id = msg["chat"]["id"]
     session = SESSIONS.get(chat_id)
+    text = msg.get("text", "")
 
     try:
-        if msg.get("text") == "/start":
+        if text.startswith("/start"):
             send_reply(chat_id, "Welcome! Choose how you'd like to log a transaction.")
             show_main_menu(chat_id)
             return "OK", 200
 
-        if msg.get("text") == "/summary":
+        if text.startswith("/summary"):
             send_detailed_summary(chat_id)
             return "OK", 200
 
-        if msg.get("text") == "/dashboard":
+        if text.startswith("/dashboard"):
             link = f"{BASE_URL}/dashboard/{chat_id}"
             send_reply(chat_id, f"📊 Your live dashboard: {link}")
             return "OK", 200
