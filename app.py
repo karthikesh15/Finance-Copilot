@@ -18,6 +18,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+@app.route("/version-check")
+def version_check():
+    return "NEON_VERSION_1", 200
+    
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:5000")
