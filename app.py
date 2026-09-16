@@ -20,8 +20,6 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-BASE_URL = "https://finance-copilot-5.onrender.com"
-
 
 SESSIONS = {}
 
@@ -36,49 +34,28 @@ CATEGORY_CONFIG = {
     "Others":    ("Others",    None),
 }
 
+# --- Telegram Messaging Helpers ---
 
-@app.route("/version-check")
-def version_check():
-    return "NEON_VERSION_1", 200
-
-
-@app.route("/dashboard/<int:chat_id>")
-def dashboard(chat_id):
-    return render_template("dashboard.html", chat_id=chat_id)
-
-
-@app.route("/api/summary/<int:chat_id>")
-def api_summary(chat_id):
-    inflow, outflow, balance = get_cash_summary(chat_id)
-    breakdown = get_category_breakdown(chat_id)
-    source_breakdown = get_source_breakdown(chat_id)
-    transactions = get_all_transactions(chat_id)
-    return jsonify({
-        "inflow": inflow,
-        "outflow": outflow,
-        "balance": balance,
-        "category_breakdown": [{"category": c, "type": t, "total": tot} for c, t, tot in breakdown],
-        "source_breakdown": [{"source": s, "count": c} for s, c in source_breakdown],
-        "transactions": transactions
-    })
-
+def send_reply(chat_id, text):
+    """Sends a standard text message back to the Telegram chat."""
+    requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json={"chat_id": chat_id, "text": text},
+        timeout=10
+    )
 
 def send_dashboard_button(chat_id):
-    link = f"{BASE_URL.rstrip('/')}/dashboard/{chat_id}"
-
+    """Sends an inline button linking dynamically to the dashboard."""
+    base_url = request.host_url.rstrip('/')
+    link = f"{base_url}/dashboard/{chat_id}"
     requests.post(
         f"{TELEGRAM_API}/sendMessage",
         json={
             "chat_id": chat_id,
-            "text": "📊 Your Finance Dashboard",
+            "text": "📊 Click below to open your interactive dashboard:",
             "reply_markup": {
                 "inline_keyboard": [
-                    [
-                        {
-                            "text": "📊 Open Dashboard",
-                            "url": link
-                        }
-                    ]
+                    [{"text": "🚀 Open Web Dashboard", "url": link}]
                 ]
             }
         },
@@ -88,20 +65,26 @@ def send_dashboard_button(chat_id):
 def send_keyboard(chat_id, text, buttons, row_size=2):
     rows = [buttons[i:i + row_size] for i in range(0, len(buttons), row_size)]
     keyboard = [[{"text": label, "callback_data": data} for label, data in row] for row in rows]
-    requests.post(f"{TELEGRAM_API}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": text,
-        "reply_markup": {"inline_keyboard": keyboard}
-    })
+    requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": {"inline_keyboard": keyboard}
+        },
+        timeout=10
+    )
 
 def answer_callback(callback_query_id):
-    requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": callback_query_id})
+    requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": callback_query_id}, timeout=5)
 
 def download_telegram_file(file_id):
-    res = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}").json()
+    res = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}", timeout=10).json()
     file_path = res["result"]["file_path"]
     download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-    return requests.get(download_url).content
+    return requests.get(download_url, timeout=15).content
+
+# --- Menu Workflows ---
 
 def show_main_menu(chat_id):
     SESSIONS[chat_id] = {"step": "main_menu"}
@@ -127,19 +110,58 @@ def format_structured_reply(parsed, source_label):
     lines = [
         f"{source_label} — Transaction Logged",
         f"{arrow} Type: {parsed['type'].capitalize()}",
-        f"Amount: {parsed['amount']}",
+        f"Amount: ₹{parsed['amount']}",
         f"Category: {parsed['category']}",
         f"Note: {parsed.get('description', '-')}"
     ]
     if parsed.get("needs_review"):
-        lines.append("")
-        lines.append("⚠️ Amount could not be confidently read — please verify and correct if needed.")
+        lines.append("\n⚠️ Amount could not be confidently read — please verify.")
     return "\n".join(lines)
 
+def send_recent_rows(chat_id, limit=10):
+    """Fetches and prints recent database transaction rows."""
+    rows = get_all_transactions(chat_id, limit=limit)
+    if not rows:
+        send_reply(chat_id, "📋 No recorded transactions found in the database.")
+        return
+
+    lines = ["📋 Recent Transactions:\n"]
+    for row in rows:
+        arrow = "📈" if row["type"] == "inflow" else "📉"
+        desc = f" ({row['description']})" if row.get('description') else ""
+        lines.append(f"• ID {row['id']}: {arrow} ₹{row['amount']} | {row['category']} | Src: {row['source']}{desc}")
+    
+    lines.append("\nType /dashboard to view full analytics.")
+    send_reply(chat_id, "\n".join(lines))
+
 def log_and_continue(chat_id, category, amount, tx_type, source, description=None):
-    add_transaction(chat_id, tx_type, amount, category,
-                     description=description, source=source)
+    add_transaction(chat_id, tx_type, amount, category, description=description, source=source)
     show_main_menu(chat_id)
+
+# --- Routes & Webhook ---
+
+@app.route("/health")
+def health_check():
+    return "OK", 200
+
+@app.route("/dashboard/<int:chat_id>")
+def dashboard(chat_id):
+    return render_template("dashboard.html", chat_id=chat_id)
+
+@app.route("/api/summary/<int:chat_id>")
+def api_summary(chat_id):
+    inflow, outflow, balance = get_cash_summary(chat_id)
+    breakdown = get_category_breakdown(chat_id)
+    source_breakdown = get_source_breakdown(chat_id)
+    transactions = get_all_transactions(chat_id)
+    return jsonify({
+        "inflow": inflow,
+        "outflow": outflow,
+        "balance": balance,
+        "category_breakdown": [{"category": c, "type": t, "total": tot} for c, t, tot in breakdown],
+        "source_breakdown": [{"source": s, "count": c} for s, c in source_breakdown],
+        "transactions": transactions
+    })
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -154,8 +176,7 @@ def webhook():
 
     msg = data["message"]
     chat_id = msg["chat"]["id"]
-    session = SESSIONS.get(chat_id)
-    text = msg.get("text", "")
+    text = msg.get("text", "").strip()
 
     try:
         if text.startswith("/start"):
@@ -164,12 +185,12 @@ def webhook():
             show_main_menu(chat_id)
             return "OK", 200
 
-        if text.startswith("/summary"):
-            send_detailed_summary(chat_id)
-            return "OK", 200
-
         if text.startswith("/dashboard"):
             send_dashboard_button(chat_id)
+            return "OK", 200
+
+        if text.startswith("/transactions") or text.startswith("/rows"):
+            send_recent_rows(chat_id)
             return "OK", 200
 
         session = SESSIONS.get(chat_id)
@@ -180,9 +201,8 @@ def webhook():
             except ValueError:
                 send_reply(chat_id, "⚠️ Please enter a valid number for the amount.")
                 return "OK", 200
-            parsed = {
-                "type": session["type"], "amount": amount, "category": session["category"], "description": None
-            }
+            
+            parsed = {"type": session["type"], "amount": amount, "category": session["category"], "description": None}
             send_reply(chat_id, format_short_reply(parsed))
             log_and_continue(chat_id, session["category"], amount, session["type"], source="button")
             return "OK", 200
@@ -233,7 +253,7 @@ def webhook():
 
         if "photo" in msg:
             show_photo_type_menu(chat_id)
-            send_reply(chat_id, "Got your photo — first tell me: inflow or outflow? Then resend the photo.")
+            send_reply(chat_id, "Got your photo — please choose inflow or outflow first, then resend.")
             return "OK", 200
 
         if "voice" in msg:
@@ -255,7 +275,6 @@ def webhook():
         show_main_menu(chat_id)
 
     return "OK", 200
-
 
 def handle_callback(query):
     callback_id = query["id"]
@@ -302,53 +321,6 @@ def handle_callback(query):
         return "OK", 200
 
     return "OK", 200
-
-
-def send_detailed_summary(chat_id):
-    inflow, outflow, balance = get_cash_summary(chat_id)
-    breakdown = get_category_breakdown(chat_id)
-    source_breakdown = get_source_breakdown(chat_id)
-
-    lines = [
-        "1. Cash Summary",
-        f"• Total Inflow: {inflow:.2f}",
-        f"• Total Outflow: {outflow:.2f}",
-        f"• Net Balance: {balance:.2f}",
-        "",
-        "2. Category Breakdown"
-    ]
-
-    if not breakdown:
-        lines.append("No transactions yet.")
-    else:
-        for category, tx_type, total in breakdown:
-            arrow = "📈" if tx_type == "inflow" else "📉"
-            lines.append(f"{arrow} {category}: {total:.2f}")
-
-        top_inflow = max((r for r in breakdown if r[1] == "inflow"), key=lambda r: r[2], default=None)
-        top_outflow = max((r for r in breakdown if r[1] == "outflow"), key=lambda r: r[2], default=None)
-
-        lines.append("")
-        lines.append("3. Highlights")
-        if top_inflow:
-            lines.append(f"Top income source: {top_inflow[0]} ({top_inflow[2]:.2f})")
-        if top_outflow:
-            lines.append(f"Top expense: {top_outflow[0]} ({top_outflow[2]:.2f})")
-
-    lines.append("")
-    lines.append("Entries by Source")
-    if not source_breakdown:
-        lines.append("No entries yet.")
-    else:
-        source_labels = {"button": "Options", "text": "Text", "photo": "Photo", "voice": "Voice"}
-        for source, count in source_breakdown:
-            lines.append(f"{source_labels.get(source, source)}: {count} entries")
-
-    lines.append("")
-    lines.append(f"📊 Full dashboard: {BASE_URL}/dashboard/{chat_id}")
-
-    send_reply(chat_id, "\n".join(lines))
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
