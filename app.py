@@ -20,10 +20,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-BASE_URL = os.getenv(
-    "RENDER_EXTERNAL_URL",
-    "https://finance-copilot-4.onrender.com"
-).rstrip("/")
+BASE_URL = "https://finance-copilot-5.onrender.com"
+
 
 SESSIONS = {}
 
