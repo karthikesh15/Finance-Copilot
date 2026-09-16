@@ -18,11 +18,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-@app.route("/version-check")
-def version_check():
-    return "NEON_VERSION_1", 200
-    
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:5000")
@@ -39,6 +34,11 @@ CATEGORY_CONFIG = {
     "Food":      ("Food",      "outflow"),
     "Others":    ("Others",    None),
 }
+
+
+@app.route("/version-check")
+def version_check():
+    return "NEON_VERSION_1", 200
 
 
 @app.route("/dashboard/<int:chat_id>")
@@ -139,6 +139,7 @@ def webhook():
 
     try:
         if text.startswith("/start"):
+            SESSIONS.pop(chat_id, None)
             send_reply(chat_id, "Welcome! Choose how you'd like to log a transaction.")
             show_main_menu(chat_id)
             return "OK", 200
@@ -151,6 +152,8 @@ def webhook():
             link = f"{BASE_URL}/dashboard/{chat_id}"
             send_reply(chat_id, f"📊 Your live dashboard: {link}")
             return "OK", 200
+
+        session = SESSIONS.get(chat_id)
 
         if session and session.get("step") == "amount" and "text" in msg:
             try:
