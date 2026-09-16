@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:5000")
+BASE_URL = os.getenv(
+    "RENDER_EXTERNAL_URL",
+    "https://finance-copilot-4.onrender.com"
+).rstrip("/")
 
 SESSIONS = {}
 
@@ -62,8 +65,27 @@ def api_summary(chat_id):
     })
 
 
-def send_reply(chat_id, text):
-    requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
+def send_dashboard_button(chat_id):
+    link = f"{BASE_URL.rstrip('/')}/dashboard/{chat_id}"
+
+    requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": "📊 Your Finance Dashboard",
+            "reply_markup": {
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "📊 Open Dashboard",
+                            "url": link
+                        }
+                    ]
+                ]
+            }
+        },
+        timeout=10
+    )
 
 def send_keyboard(chat_id, text, buttons, row_size=2):
     rows = [buttons[i:i + row_size] for i in range(0, len(buttons), row_size)]
@@ -149,8 +171,7 @@ def webhook():
             return "OK", 200
 
         if text.startswith("/dashboard"):
-            link = f"{BASE_URL}/dashboard/{chat_id}"
-            send_reply(chat_id, f"📊 Your live dashboard: {link}")
+            send_dashboard_button(chat_id)
             return "OK", 200
 
         session = SESSIONS.get(chat_id)
