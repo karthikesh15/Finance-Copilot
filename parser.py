@@ -57,7 +57,7 @@ Respond ONLY with raw valid JSON in this exact format, no markdown, no explanati
 }}
 """
     messages = [{"role": "user", "content": prompt}]
-    return safe_chat_call(messages, model="groq/compound-mini")
+    return safe_chat_call(messages, model="openai/gpt-oss-20b")
 
 def parse_receipt_image(image_base64, known_type):
     prompt = f"""
