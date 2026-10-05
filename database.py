@@ -16,19 +16,34 @@ def get_conn():
 def init_db():
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id BIGINT NOT NULL,
-            type TEXT CHECK (type IN ('inflow', 'outflow')),
-            amount NUMERIC NOT NULL,
-            category TEXT,
-            subcategory TEXT,
-            description TEXT,
-            source TEXT CHECK (source IN ('text', 'photo', 'voice', 'button')),
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    if DATABASE_URL:
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                type TEXT CHECK (type IN ('inflow', 'outflow')),
+                amount NUMERIC NOT NULL,
+                category TEXT,
+                subcategory TEXT,
+                description TEXT,
+                source TEXT CHECK (source IN ('text', 'photo', 'voice', 'button')),
+                timestamp TIMESTAMPTZ DEFAULT NOW()
+            )
+        ''')
+    else:
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                type TEXT CHECK (type IN ('inflow', 'outflow')),
+                amount REAL NOT NULL,
+                category TEXT,
+                subcategory TEXT,
+                description TEXT,
+                source TEXT CHECK (source IN ('text', 'photo', 'voice', 'button')),
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
     conn.commit()
     cursor.close()
     conn.close()
