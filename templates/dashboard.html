@@ -9,9 +9,15 @@
 </head>
 <body class="bg-gray-100 min-h-screen">
 
-<header class="bg-gradient-to-r from-indigo-600 to-blue-600 text-white p-6 shadow-md">
-  <h1 class="text-2xl font-bold">Micro-SMB Finance Copilot</h1>
-  <p class="text-indigo-100 text-sm mt-1">Live ledger dashboard — updates automatically</p>
+<header class="bg-gradient-to-r from-indigo-600 to-blue-600 text-white p-6 shadow-md flex items-center justify-between">
+  <div>
+    <h1 class="text-2xl font-bold">Micro-SMB Finance Copilot</h1>
+    <p class="text-indigo-100 text-sm mt-1">Live ledger dashboard — updates automatically</p>
+  </div>
+  <form method="post" action="/logout" class="text-right">
+    <p class="text-sm text-indigo-100 mb-1">Signed in as <b>{{ username }}</b></p>
+    <button class="bg-white/20 hover:bg-white/30 rounded-lg px-3 py-1 text-sm">Log out</button>
+  </form>
 </header>
 
 <main class="max-w-6xl mx-auto p-6">
@@ -64,11 +70,15 @@
 </main>
 
 <script>
-const chatId = "{{ chat_id }}";
 let categoryChart, sourceChart;
 
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => (
+  {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]
+));
+
 async function loadData() {
-  const res = await fetch(`/api/summary/${chatId}`);
+  const res = await fetch("/api/summary");
+  if (res.status === 401) { window.location = "/login"; return; }
   const data = await res.json();
 
   document.getElementById("inflow").innerText = `₹${data.inflow.toFixed(2)}`;
@@ -103,12 +113,12 @@ async function loadData() {
     const time = new Date(tx.timestamp).toLocaleString();
     const typeColor = tx.type === "inflow" ? "text-green-600" : "text-red-600";
     row.innerHTML = `
-      <td class="py-2 pr-4 text-gray-500">${time}</td>
-      <td class="py-2 pr-4 font-medium ${typeColor}">${tx.type}</td>
-      <td class="py-2 pr-4">₹${tx.amount}</td>
-      <td class="py-2 pr-4">${tx.category}</td>
-      <td class="py-2 pr-4 text-gray-500">${tx.source}</td>
-      <td class="py-2 pr-4 text-gray-500">${tx.description || "-"}</td>
+      <td class="py-2 pr-4 text-gray-500">${esc(time)}</td>
+      <td class="py-2 pr-4 font-medium ${typeColor}">${esc(tx.type)}</td>
+      <td class="py-2 pr-4">₹${esc(tx.amount)}</td>
+      <td class="py-2 pr-4">${esc(tx.category)}</td>
+      <td class="py-2 pr-4 text-gray-500">${esc(tx.source)}</td>
+      <td class="py-2 pr-4 text-gray-500">${esc(tx.description || "-")}</td>
     `;
     tbody.appendChild(row);
   });
