@@ -2,6 +2,7 @@ import os
 import re
 import json
 from groq import Groq
+from i18n import LLM_LANG_NAMES
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
@@ -29,8 +30,13 @@ def safe_chat_call(messages, model, use_json_mode=True):
         return extract_json(response.choices[0].message.content)
 
 
-def parse_transaction_text(text_input):
+def parse_transaction_text(text_input, lang="en"):
     prompt = f"""
+The message may be in English, Hindi, Tamil or Telugu (native script or romanized) 
+and may use number words (e.g. "पाँच सौ", "ஐநூறு", "ఐదు వందలు") — convert them 
+to digits for "amount". Write "description" in {LLM_LANG_NAMES[lang]}. Keep "category" 
+and "type" exactly as specified in English.
+
 You are a financial transaction extraction assistant for a small business ledger.
 Extract the transaction details from the message below, even if it is long, indirect,
 uses informal language, or mixes multiple details together.
@@ -59,8 +65,11 @@ Respond ONLY with raw valid JSON in this exact format, no markdown, no explanati
     messages = [{"role": "user", "content": prompt}]
     return safe_chat_call(messages, model="openai/gpt-oss-20b")
 
-def parse_receipt_image(image_base64, known_type):
+def parse_receipt_image(image_base64, known_type, lang="en"):
     prompt = f"""
+Write "description" in {LLM_LANG_NAMES[lang]} (item names may be translated or transliterated). 
+Keep "category" exactly as one of the English values above.
+
 You are an expert at reading receipts and handwritten bills for a small business ledger.
 The image may contain a computer-printed OR handwritten bill, possibly with MULTIPLE line items,
 a quantity column, a tax line, and a final total. The image may ALSO contain unrelated handwritten
@@ -106,9 +115,9 @@ Respond ONLY with raw valid JSON, no markdown, no explanation:
     return safe_chat_call(messages, model="qwen/qwen3.8-27b")
 
 
-def analyze_receipt_image_safe(image_base64, known_type):
+def analyze_receipt_image_safe(image_base64, known_type, lang="en"):
     try:
-        result = parse_receipt_image(image_base64, known_type)
+        result = parse_receipt_image(image_base64, known_type, lang)
         amount = float(result.get("amount", 0) or 0)
         category = result.get("category") or "Others"
         if category not in CATEGORIES:
@@ -132,15 +141,18 @@ def analyze_receipt_image_safe(image_base64, known_type):
         }
 
 
-def transcribe_voice_note(file_bytes):
+def transcribe_voice_note(file_bytes, lang=None):
     temp_path = "temp_voice.ogg"
     with open(temp_path, "wb") as f:
         f.write(file_bytes)
 
+    kwargs = {"model": "whisper-large-v3-turbo"}
+    if lang and lang != "en":
+        kwargs["language"] = lang
+
     with open(temp_path, "rb") as audio_file:
         transcription = groq_client.audio.transcriptions.create(
-            file=(temp_path, audio_file.read()),
-            model="whisper-large-v3-turbo"
+            file=(temp_path, audio_file.read()), **kwargs
         )
 
     if os.path.exists(temp_path):
