@@ -1,0 +1,21 @@
+{% extends "auth_base.html" %}
+{% block title %}Login — Finance Copilot{% endblock %}
+{% block subtitle %}Sign in to view your dashboard{% endblock %}
+{% block content %}
+<form method="post" class="space-y-4">
+  <div>
+    <label class="block text-sm text-gray-600 mb-1">Username</label>
+    <input name="username" required autocomplete="username"
+           class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+  </div>
+  <div>
+    <label class="block text-sm text-gray-600 mb-1">Password</label>
+    <input name="password" type="password" required autocomplete="current-password"
+           class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+  </div>
+  <button class="w-full bg-indigo-600 text-white rounded-lg py-2 font-medium hover:bg-indigo-700">Log in</button>
+</form>
+<p class="text-xs text-gray-500 mt-4 text-center">
+  New user or forgot password? Send <b>/dashboard</b> or <b>/resetpassword</b> to the Telegram bot for a secure setup link.
+</p>
+{% endblock %}
