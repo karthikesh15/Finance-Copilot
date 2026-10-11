@@ -5,11 +5,12 @@ import time
 import base64
 import logging
 import requests
+import hmac
 from datetime import timedelta
 from functools import wraps
 
 from flask import (Flask, request, render_template, jsonify,
-                   session, redirect, url_for)
+                   session, redirect, url_for, send_file)
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
@@ -601,6 +602,17 @@ def handle_callback(query):
         return "OK", 200
 
     return "OK", 200
+
+ADMIN_KEY = os.getenv("ADMIN_KEY")
+
+@app.route("/admin/download-db")
+def admin_download_db():
+    key = request.args.get("key", "")
+    if not ADMIN_KEY or not hmac.compare_digest(key.encode(), ADMIN_KEY.encode()):
+        return "Not found", 404
+    if os.getenv("DATABASE_URL") or not os.path.exists("finance.db"):
+        return "No local SQLite file", 404
+    return send_file("finance.db", as_attachment=True)
 
 
 if __name__ == "__main__":
