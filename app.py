@@ -1,22 +1,31 @@
 import os
-import logging
+import re
+import math
+import time
 import base64
+import logging
 import requests
-from flask import Flask, request, render_template, jsonify
+from datetime import timedelta
+from functools import wraps
+
+from flask import (Flask, request, render_template, jsonify,
+                   session, redirect, url_for)
+from itsdangerous import URLSafeTimedSerializer, BadSignature
+from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 
+load_dotenv()
+
 from database import (
-    init_db, add_transaction, get_cash_summary,
-    get_category_breakdown, get_source_breakdown, get_all_transactions
+    init_db, add_transaction, get_cash_summary, get_category_breakdown,
+    get_source_breakdown, get_all_transactions,
+    get_user, get_user_by_username, set_language, set_credentials
 )
 from parser import parse_transaction_text, analyze_receipt_image_safe, transcribe_voice_note
+from i18n import (
+    LANGS, LANG_PROMPT, CATEGORY_CONFIG, t, cat_name, cat_label, category_prompt
+)
 
-
-# ============================================================
-# INITIALIZATION
-# ============================================================
-
-load_dotenv()
 init_db()
 
 logging.basicConfig(level=logging.INFO)
@@ -24,364 +33,98 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    if os.getenv("RENDER"):
+        raise RuntimeError("SECRET_KEY environment variable is required in production")
+    SECRET_KEY = "dev-only-secret"
+
+app.secret_key = SECRET_KEY
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=bool(os.getenv("RENDER")),
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+)
+
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-SESSIONS = {}
+SESSIONS = {}      # per-chat conversation state (in memory)
+LANG_CACHE = {}    # chat_id -> language code (source of truth is the DB)
+
+serializer = URLSafeTimedSerializer(SECRET_KEY, salt="login-setup")
+TOKEN_MAX_AGE = 1800  # 30 minutes
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
+
+LOGIN_ATTEMPTS = {}
+MAX_ATTEMPTS, LOCK_SECONDS = 5, 300
+
+SRC_ICON = {"button": "📝", "text": "💬", "photo": "📸", "voice": "🎤"}
 
 
 # ============================================================
-# TRANSACTION CATEGORIES
+# AUTH HELPERS
 # ============================================================
 
-CATEGORY_CONFIG = {
-    "Sales":     ("🛒 Sales", "inflow"),
-    "Supplies":  ("📦 Supplies", "outflow"),
-    "Wages":     ("👷 Wages", "outflow"),
-    "Rent":      ("🏠 Rent", "outflow"),
-    "Utilities": ("💡 Utilities", "outflow"),
-    "Transport": ("🚗 Transport", "outflow"),
-    "Food":      ("🍔 Food", "outflow"),
-    "Others":    ("📝 Others", None),
-}
+def client_ip():
+    xff = request.headers.get("X-Forwarded-For", "")
+    return xff.split(",")[-1].strip() if xff else (request.remote_addr or "")
 
 
-# ============================================================
-# TELEGRAM MESSAGING HELPERS
-# ============================================================
-
-def send_reply(chat_id, text):
-    """Sends a standard text message back to the Telegram chat."""
-    requests.post(
-        f"{TELEGRAM_API}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": text
-        },
-        timeout=10
-    )
+def is_locked(key):
+    count, ts = LOGIN_ATTEMPTS.get(key, (0, 0))
+    if time.time() - ts >= LOCK_SECONDS:
+        LOGIN_ATTEMPTS.pop(key, None)
+        return False
+    return count >= MAX_ATTEMPTS
 
 
-def send_dashboard_button(chat_id):
-    """Sends an inline button linking dynamically to the dashboard."""
-
-    base_url = request.host_url.rstrip("/")
-    link = f"{base_url}/dashboard/{chat_id}"
-
-    requests.post(
-        f"{TELEGRAM_API}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": "📊 Click below to open your interactive dashboard:",
-            "reply_markup": {
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": "🚀 Open Web Dashboard",
-                            "url": link
-                        }
-                    ]
-                ]
-            }
-        },
-        timeout=10
-    )
+def record_failure(key):
+    count, ts = LOGIN_ATTEMPTS.get(key, (0, time.time()))
+    LOGIN_ATTEMPTS[key] = (count + 1, ts)
 
 
-def send_keyboard(chat_id, text, buttons, row_size=2):
-    """
-    Sends an inline keyboard.
-
-    buttons format:
-    [
-        ("Button Text", "callback_data"),
-        ...
-    ]
-    """
-
-    rows = [
-        buttons[i:i + row_size]
-        for i in range(0, len(buttons), row_size)
-    ]
-
-    keyboard = [
-        [
-            {
-                "text": label,
-                "callback_data": data
-            }
-            for label, data in row
-        ]
-        for row in rows
-    ]
-
-    requests.post(
-        f"{TELEGRAM_API}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": text,
-            "reply_markup": {
-                "inline_keyboard": keyboard
-            }
-        },
-        timeout=10
-    )
+def _fingerprint(user):
+    return ((user or {}).get("password_hash") or "")[-10:]
 
 
-def answer_callback(callback_query_id):
-    """Acknowledges a Telegram button click."""
-
-    requests.post(
-        f"{TELEGRAM_API}/answerCallbackQuery",
-        json={
-            "callback_query_id": callback_query_id
-        },
-        timeout=5
-    )
+def make_setup_token(chat_id):
+    # Fingerprint changes once a password is set, so each link works only once.
+    return serializer.dumps([chat_id, _fingerprint(get_user(chat_id))])
 
 
-def download_telegram_file(file_id):
-    """Downloads a file sent by the user through Telegram."""
+def read_setup_token(token):
+    try:
+        chat_id, fp = serializer.loads(token, max_age=TOKEN_MAX_AGE)
+    except (BadSignature, ValueError, TypeError):
+        return None
+    return chat_id if fp == _fingerprint(get_user(chat_id)) else None
 
-    res = requests.get(
-        f"{TELEGRAM_API}/getFile?file_id={file_id}",
-        timeout=10
-    ).json()
 
-    file_path = res["result"]["file_path"]
+def login_required(view):
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if "chat_id" not in session:
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "unauthorized"}), 401
+            return redirect(url_for("login"))
+        return view(*args, **kwargs)
+    return wrapper
 
-    download_url = (
-        f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-    )
 
-    return requests.get(
-        download_url,
-        timeout=15
-    ).content
+def base_url():
+    env = os.getenv("BASE_URL")
+    if env:
+        return env.rstrip("/")
+    url = request.host_url.rstrip("/")
+    if "localhost" not in url and "127.0.0.1" not in url:
+        url = url.replace("http://", "https://")
+    return url
 
 
 # ============================================================
-# MENU WORKFLOWS
-# ============================================================
-
-def show_main_menu(chat_id):
-    """
-    Main transaction input menu.
-    """
-
-    SESSIONS[chat_id] = {
-        "step": "main_menu"
-    }
-
-    buttons = [
-        ("📝 Choose Category", "menu_options"),
-        ("📸 Receipt Photo", "menu_photo"),
-        ("🎤 Voice Message", "menu_voice")
-    ]
-
-    send_keyboard(
-        chat_id,
-
-        "💰 How would you like to record your transaction?\n\n"
-
-        "📝 Choose Category → Select what the money is for\n"
-        "📸 Receipt Photo → Send a bill or receipt photo\n"
-        "🎤 Voice Message → Tell me the transaction by voice",
-
-        buttons,
-
-        row_size=1
-    )
-
-
-def show_category_menu(chat_id):
-    """
-    Shows transaction categories with simple explanations.
-    """
-
-    SESSIONS[chat_id] = {
-        "step": "category"
-    }
-
-    buttons = [
-        (label, f"cat_{key}")
-        for key, (label, _) in CATEGORY_CONFIG.items()
-    ]
-
-    send_keyboard(
-        chat_id,
-
-        "📂 What type of transaction is this?\n\n"
-
-        "🛒 Sales → Money you received\n"
-        "📦 Supplies → Materials/items you bought\n"
-        "👷 Wages → Employee payments\n"
-        "🏠 Rent → Shop/office rent\n"
-        "💡 Utilities → Electricity, water, internet\n"
-        "🚗 Transport → Travel/delivery expenses\n"
-        "🍔 Food → Food expenses\n"
-        "📝 Others → Anything that doesn't fit above",
-
-        buttons,
-
-        row_size=2
-    )
-
-
-def show_photo_type_menu(chat_id):
-    """
-    Asks whether the receipt represents money received
-    or money spent.
-    """
-
-    SESSIONS[chat_id] = {
-        "step": "photo_type"
-    }
-
-    send_keyboard(
-        chat_id,
-
-        "📸 What does this receipt represent?\n\n"
-
-        "📈 Money Received → Income / money coming in\n"
-        "📉 Money Spent → Expense / money going out",
-
-        [
-            ("📈 Money Received", "phototype_inflow"),
-            ("📉 Money Spent", "phototype_outflow")
-        ],
-
-        row_size=1
-    )
-
-
-# ============================================================
-# RESPONSE FORMATTING
-# ============================================================
-
-def format_short_reply(parsed):
-    """Formats a short transaction confirmation."""
-
-    arrow = (
-        "📈"
-        if parsed["type"] == "inflow"
-        else "📉"
-    )
-
-    return (
-        f"✅ Transaction logged: "
-        f"{arrow} "
-        f"{parsed['type'].capitalize()} "
-        f"₹{parsed['amount']} "
-        f"({parsed['category']})"
-    )
-
-
-def format_structured_reply(parsed, source_label):
-    """Formats a detailed transaction confirmation."""
-
-    arrow = (
-        "📈"
-        if parsed["type"] == "inflow"
-        else "📉"
-    )
-
-    lines = [
-        f"{source_label} — Transaction Logged",
-        f"{arrow} Type: {parsed['type'].capitalize()}",
-        f"Amount: ₹{parsed['amount']}",
-        f"Category: {parsed['category']}",
-        f"Note: {parsed.get('description', '-')}"
-    ]
-
-    if parsed.get("needs_review"):
-        lines.append(
-            "\n⚠️ Amount could not be confidently read — "
-            "please verify."
-        )
-
-    return "\n".join(lines)
-
-
-# ============================================================
-# DATABASE / TRANSACTION HELPERS
-# ============================================================
-
-def send_recent_rows(chat_id, limit=10):
-    """Fetches and prints recent database transaction rows."""
-
-    rows = get_all_transactions(
-        chat_id,
-        limit=limit
-    )
-
-    if not rows:
-        send_reply(
-            chat_id,
-            "📋 No recorded transactions found in the database."
-        )
-        return
-
-    lines = [
-        "📋 Recent Transactions:\n"
-    ]
-
-    for row in rows:
-
-        arrow = (
-            "📈"
-            if row["type"] == "inflow"
-            else "📉"
-        )
-
-        desc = (
-            f" ({row['description']})"
-            if row.get("description")
-            else ""
-        )
-
-        lines.append(
-            f"• ID {row['id']}: "
-            f"{arrow} ₹{row['amount']} | "
-            f"{row['category']} | "
-            f"Src: {row['source']}"
-            f"{desc}"
-        )
-
-    lines.append(
-        "\nType /dashboard to view full analytics."
-    )
-
-    send_reply(
-        chat_id,
-        "\n".join(lines)
-    )
-
-
-def log_and_continue(
-    chat_id,
-    category,
-    amount,
-    tx_type,
-    source,
-    description=None
-):
-    """Stores the transaction and returns to the main menu."""
-
-    add_transaction(
-        chat_id,
-        tx_type,
-        amount,
-        category,
-        description=description,
-        source=source
-    )
-
-    show_main_menu(chat_id)
-
-
-# ============================================================
-# FLASK ROUTES
+# WEB ROUTES
 # ============================================================
 
 @app.route("/health")
@@ -389,57 +132,315 @@ def health_check():
     return "OK", 200
 
 
+@app.route("/")
+def index():
+    return redirect(url_for("dashboard" if "chat_id" in session else "login"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return render_template("login.html")
+
+    key = client_ip()
+    if is_locked(key):
+        return render_template(
+            "login.html", error="Too many failed attempts. Try again in a few minutes."
+        ), 429
+
+    username = request.form.get("username", "").strip().lower()
+    password = request.form.get("password", "")
+    user = get_user_by_username(username)
+
+    if not user or not check_password_hash(user["password_hash"], password):
+        record_failure(key)
+        return render_template("login.html", error="Invalid username or password."), 401
+
+    LOGIN_ATTEMPTS.pop(key, None)
+    session.clear()
+    session.permanent = True
+    session["chat_id"] = user["chat_id"]
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/setup/<token>", methods=["GET", "POST"])
+def setup(token):
+    chat_id = read_setup_token(token)
+    if chat_id is None:
+        return render_template("setup.html", invalid=True), 400
+
+    if request.method == "GET":
+        return render_template("setup.html")
+
+    username = request.form.get("username", "").strip().lower()
+    password = request.form.get("password", "")
+    confirm = request.form.get("confirm", "")
+
+    error = None
+    if not USERNAME_RE.match(username):
+        error = "Username must be 3–20 characters: letters, numbers or underscore."
+    elif len(password) < 8:
+        error = "Password must be at least 8 characters."
+    elif password != confirm:
+        error = "Passwords do not match."
+    else:
+        existing = get_user_by_username(username)
+        if existing and existing["chat_id"] != chat_id:
+            error = "That username is taken. Please choose another."
+
+    if error:
+        return render_template("setup.html", error=error, username=username), 400
+
+    set_credentials(chat_id, username, generate_password_hash(password))
+    session.clear()
+    session.permanent = True
+    session["chat_id"] = chat_id
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    user = get_user(session["chat_id"])
+    if not user or not user.get("username"):
+        session.clear()
+        return redirect(url_for("login"))
+    return render_template("dashboard.html", username=user["username"])
+
+
 @app.route("/dashboard/<int:chat_id>")
-def dashboard(chat_id):
-    return render_template(
-        "dashboard.html",
-        chat_id=chat_id
-    )
+def dashboard_legacy(chat_id):
+    # Old links from earlier bot messages: send everyone through the login.
+    return redirect(url_for("dashboard"))
 
 
-@app.route("/api/summary/<int:chat_id>")
-def api_summary(chat_id):
-
-    inflow, outflow, balance = get_cash_summary(
-        chat_id
-    )
-
-    breakdown = get_category_breakdown(
-        chat_id
-    )
-
-    source_breakdown = get_source_breakdown(
-        chat_id
-    )
-
-    transactions = get_all_transactions(
-        chat_id
-    )
-
+@app.route("/api/summary")
+@login_required
+def api_summary():
+    chat_id = session["chat_id"]
+    inflow, outflow, balance = get_cash_summary(chat_id)
     return jsonify({
         "inflow": inflow,
         "outflow": outflow,
         "balance": balance,
-
         "category_breakdown": [
-            {
-                "category": c,
-                "type": t,
-                "total": tot
-            }
-            for c, t, tot in breakdown
+            {"category": c, "type": ty, "total": tot}
+            for c, ty, tot in get_category_breakdown(chat_id)
         ],
-
         "source_breakdown": [
-            {
-                "source": s,
-                "count": c
-            }
-            for s, c in source_breakdown
+            {"source": s, "count": c} for s, c in get_source_breakdown(chat_id)
         ],
-
-        "transactions": transactions
+        "transactions": get_all_transactions(chat_id),
     })
+
+
+# ============================================================
+# TELEGRAM HELPERS
+# ============================================================
+
+def send_reply(chat_id, text):
+    requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json={"chat_id": chat_id, "text": text},
+        timeout=10,
+    )
+
+
+def send_keyboard(chat_id, text, buttons, row_size=2):
+    rows = [buttons[i:i + row_size] for i in range(0, len(buttons), row_size)]
+    keyboard = [[{"text": label, "callback_data": data} for label, data in row] for row in rows]
+    requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json={"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": keyboard}},
+        timeout=10,
+    )
+
+
+def send_url_button(chat_id, text, label, link):
+    requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": {"inline_keyboard": [[{"text": label, "url": link}]]},
+        },
+        timeout=10,
+    )
+
+
+def answer_callback(callback_query_id):
+    requests.post(
+        f"{TELEGRAM_API}/answerCallbackQuery",
+        json={"callback_query_id": callback_query_id},
+        timeout=5,
+    )
+
+
+def download_telegram_file(file_id):
+    res = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}", timeout=10).json()
+    file_path = res["result"]["file_path"]
+    return requests.get(
+        f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=15
+    ).content
+
+
+# ============================================================
+# LANGUAGE
+# ============================================================
+
+def get_lang(chat_id):
+    if chat_id in LANG_CACHE:
+        return LANG_CACHE[chat_id]
+    user = get_user(chat_id)
+    lang = user.get("language") if user else None
+    if lang in LANGS:
+        LANG_CACHE[chat_id] = lang
+        return lang
+    return None
+
+
+def show_language_picker(chat_id):
+    SESSIONS.pop(chat_id, None)
+    buttons = [(name, f"lang_{code}") for code, name in LANGS.items()]
+    send_keyboard(chat_id, LANG_PROMPT, buttons, row_size=2)
+
+
+# ============================================================
+# MENUS
+# ============================================================
+
+def show_main_menu(chat_id, lang):
+    SESSIONS[chat_id] = {"step": "main_menu"}
+    buttons = [
+        (t(lang, "btn_category"), "menu_options"),
+        (t(lang, "btn_photo"), "menu_photo"),
+        (t(lang, "btn_voice"), "menu_voice"),
+    ]
+    send_keyboard(chat_id, t(lang, "main_prompt"), buttons, row_size=1)
+
+
+def show_category_menu(chat_id, lang):
+    SESSIONS[chat_id] = {"step": "category"}
+    buttons = [(cat_label(lang, key), f"cat_{key}") for key in CATEGORY_CONFIG]
+    send_keyboard(chat_id, category_prompt(lang), buttons, row_size=2)
+
+
+def show_photo_type_menu(chat_id, lang):
+    SESSIONS[chat_id] = {"step": "photo_type"}
+    send_keyboard(
+        chat_id,
+        t(lang, "photo_type_prompt"),
+        [(t(lang, "btn_received"), "phototype_inflow"),
+         (t(lang, "btn_spent"), "phototype_outflow")],
+        row_size=1,
+    )
+
+
+def send_dashboard_link(chat_id, lang, reset=False):
+    user = get_user(chat_id)
+    has_login = bool(user and user.get("password_hash"))
+
+    if has_login and not reset:
+        send_url_button(chat_id, t(lang, "dash_login"), t(lang, "btn_dash"),
+                        f"{base_url()}/login")
+        return
+
+    link = f"{base_url()}/setup/{make_setup_token(chat_id)}"
+    if has_login:
+        send_url_button(chat_id, t(lang, "reset_msg"), t(lang, "btn_reset"), link)
+    else:
+        send_url_button(chat_id, t(lang, "dash_setup"), t(lang, "btn_setup"), link)
+
+
+# ============================================================
+# FORMATTING
+# ============================================================
+
+def format_short_reply(parsed, lang):
+    arrow = "📈" if parsed["type"] == "inflow" else "📉"
+    return t(
+        lang, "logged",
+        arrow=arrow,
+        type=t(lang, f"type_{parsed['type']}"),
+        amount=parsed["amount"],
+        category=cat_name(lang, parsed["category"]),
+    )
+
+
+def format_structured_reply(parsed, source_label, lang):
+    arrow = "📈" if parsed["type"] == "inflow" else "📉"
+    lines = [
+        t(lang, "struct_title", source=source_label),
+        f"{arrow} {t(lang, 'lbl_type')}: {t(lang, 'type_' + parsed['type'])}",
+        f"{t(lang, 'lbl_amount')}: ₹{parsed['amount']}",
+        f"{t(lang, 'lbl_category')}: {cat_name(lang, parsed['category'])}",
+        f"{t(lang, 'lbl_note')}: {parsed.get('description') or '-'}",
+    ]
+    if parsed.get("needs_review"):
+        lines.append("\n" + t(lang, "needs_review"))
+    return "\n".join(lines)
+
+
+def send_recent_rows(chat_id, lang, limit=10):
+    rows = get_all_transactions(chat_id, limit=limit)
+    if not rows:
+        send_reply(chat_id, t(lang, "no_rows"))
+        return
+
+    lines = [t(lang, "recent_header")]
+    for row in rows:
+        arrow = "📈" if row["type"] == "inflow" else "📉"
+        desc = f" ({row['description']})" if row.get("description") else ""
+        lines.append(
+            f"• #{row['id']} {arrow} ₹{row['amount']} | "
+            f"{cat_name(lang, row['category'])} | {SRC_ICON.get(row['source'], '')}{desc}"
+        )
+    lines.append(t(lang, "recent_footer"))
+    send_reply(chat_id, "\n".join(lines))
+
+
+# ============================================================
+# TRANSACTION HANDLERS
+# ============================================================
+
+def log_and_continue(chat_id, lang, category, amount, tx_type, source, description=None):
+    if category not in CATEGORY_CONFIG:
+        category = "Others"
+    add_transaction(chat_id, tx_type, amount, category,
+                    description=description, source=source)
+    show_main_menu(chat_id, lang)
+
+
+def handle_text_transaction(chat_id, lang, text):
+    parsed = parse_transaction_text(text, lang)
+    send_reply(chat_id, format_short_reply(parsed, lang))
+    log_and_continue(chat_id, lang, parsed["category"], parsed["amount"], parsed["type"],
+                     "text", parsed.get("description"))
+
+
+def handle_photo(chat_id, lang, msg, known_type):
+    img_bytes = download_telegram_file(msg["photo"][-1]["file_id"])
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+    parsed = analyze_receipt_image_safe(img_b64, known_type, lang)
+    send_reply(chat_id, format_structured_reply(parsed, t(lang, "src_photo"), lang))
+    log_and_continue(chat_id, lang, parsed["category"], parsed["amount"], parsed["type"],
+                     "photo", parsed.get("description"))
+
+
+def handle_voice(chat_id, lang, msg):
+    voice_bytes = download_telegram_file(msg["voice"]["file_id"])
+    transcript = transcribe_voice_note(voice_bytes, lang)
+    parsed = parse_transaction_text(transcript, lang)
+    send_reply(chat_id, t(lang, "heard", text=transcript))
+    send_reply(chat_id, format_structured_reply(parsed, t(lang, "src_voice"), lang))
+    log_and_continue(chat_id, lang, parsed["category"], parsed["amount"], parsed["type"],
+                     "voice", parsed.get("description"))
 
 
 # ============================================================
@@ -448,579 +449,160 @@ def api_summary(chat_id):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-
-    data = request.get_json()
-
-    logger.info(
-        f"RAW INCOMING: {data}"
-    )
-
-    # --------------------------------------------------------
-    # CALLBACK QUERY / BUTTON CLICK
-    # --------------------------------------------------------
+    data = request.get_json(silent=True) or {}
+    logger.info(f"RAW INCOMING: {data}")
 
     if "callback_query" in data:
-        return handle_callback(
-            data["callback_query"]
-        )
+        return handle_callback(data["callback_query"])
 
-    # --------------------------------------------------------
-    # IGNORE UPDATES WITHOUT A MESSAGE
-    # --------------------------------------------------------
-
-    if "message" not in data:
+    msg = data.get("message")
+    if not msg:
         return "OK", 200
 
-    msg = data["message"]
-
     chat_id = msg["chat"]["id"]
-
-    text = msg.get(
-        "text",
-        ""
-    ).strip()
+    text = (msg.get("text") or "").strip()
 
     try:
-
-        # ====================================================
-        # /start
-        # ====================================================
-
-        if text.startswith("/start"):
-
-            SESSIONS.pop(
-                chat_id,
-                None
-            )
-
-            send_reply(
-                chat_id,
-                "👋 Welcome to Finance Copilot!\n\n"
-                "I can help you record and understand "
-                "your business transactions."
-            )
-
-            show_main_menu(
-                chat_id
-            )
-
+        # Language is always asked first
+        if text.startswith(("/start", "/language")):
+            show_language_picker(chat_id)
             return "OK", 200
 
-        # ====================================================
-        # /dashboard
-        # ====================================================
+        lang = get_lang(chat_id)
+        if not lang:
+            show_language_picker(chat_id)
+            return "OK", 200
 
+        # Commands are checked before any conversation state
         if text.startswith("/dashboard"):
-
-            send_dashboard_button(
-                chat_id
-            )
-
+            send_dashboard_link(chat_id, lang)
             return "OK", 200
 
-        # ====================================================
-        # /transactions OR /rows
-        # ====================================================
-
-        if (
-            text.startswith("/transactions")
-            or text.startswith("/rows")
-        ):
-
-            send_recent_rows(
-                chat_id
-            )
-
+        if text.startswith("/resetpassword"):
+            send_dashboard_link(chat_id, lang, reset=True)
             return "OK", 200
 
-        # ====================================================
-        # GET CURRENT SESSION
-        # ====================================================
+        if text.startswith(("/transactions", "/rows")):
+            send_recent_rows(chat_id, lang)
+            return "OK", 200
 
-        session = SESSIONS.get(
-            chat_id
-        )
+        state = SESSIONS.get(chat_id) or {}
+        step = state.get("step")
 
-        # ====================================================
-        # ENTER AMOUNT
-        # ====================================================
-
-        if (
-            session
-            and session.get("step") == "amount"
-            and "text" in msg
-        ):
-
+        if step == "amount" and "text" in msg:
             try:
-
-                amount = float(
-                    msg["text"]
-                    .replace(",", "")
-                    .strip()
-                )
-
+                amount = float(text.replace(",", ""))
+                if not math.isfinite(amount) or amount <= 0:
+                    raise ValueError
             except ValueError:
-
-                send_reply(
-                    chat_id,
-                    "⚠️ Please enter a valid number for the amount."
-                )
-
+                send_reply(chat_id, t(lang, "invalid_amount"))
                 return "OK", 200
 
-            parsed = {
-                "type": session["type"],
-                "amount": amount,
-                "category": session["category"],
-                "description": None
-            }
-
-            send_reply(
-                chat_id,
-                format_short_reply(parsed)
-            )
-
-            log_and_continue(
-                chat_id,
-                session["category"],
-                amount,
-                session["type"],
-                source="button"
-            )
-
+            parsed = {"type": state["type"], "amount": amount,
+                      "category": state["category"], "description": None}
+            send_reply(chat_id, format_short_reply(parsed, lang))
+            log_and_continue(chat_id, lang, state["category"], amount, state["type"], "button")
             return "OK", 200
 
-        # ====================================================
-        # OTHERS → USER ENTERS DESCRIPTION
-        # ====================================================
-
-        if (
-            session
-            and session.get("step") == "others_text"
-            and "text" in msg
-        ):
-
-            parsed = parse_transaction_text(
-                msg["text"]
-            )
-
-            send_reply(
-                chat_id,
-                format_short_reply(parsed)
-            )
-
-            log_and_continue(
-                chat_id,
-                parsed["category"],
-                parsed["amount"],
-                parsed["type"],
-                source="text",
-                description=parsed.get("description")
-            )
-
+        if step == "others_text" and "text" in msg:
+            handle_text_transaction(chat_id, lang, text)
             return "OK", 200
 
-        # ====================================================
-        # RECEIPT PHOTO
-        # ====================================================
-
-        if (
-            session
-            and session.get("step") == "awaiting_photo"
-            and "photo" in msg
-        ):
-
-            known_type = session.get(
-                "photo_type",
-                "outflow"
-            )
-
-            file_id = msg["photo"][-1]["file_id"]
-
-            img_bytes = download_telegram_file(
-                file_id
-            )
-
-            img_b64 = base64.b64encode(
-                img_bytes
-            ).decode("utf-8")
-
-            parsed = analyze_receipt_image_safe(
-                img_b64,
-                known_type
-            )
-
-            send_reply(
-                chat_id,
-                format_structured_reply(
-                    parsed,
-                    "📸 Photo"
-                )
-            )
-
-            log_and_continue(
-                chat_id,
-                parsed["category"],
-                parsed["amount"],
-                parsed["type"],
-                source="photo",
-                description=parsed.get("description")
-            )
-
+        if step == "awaiting_photo" and "photo" in msg:
+            handle_photo(chat_id, lang, msg, state.get("photo_type", "outflow"))
             return "OK", 200
 
-        # ====================================================
-        # VOICE MESSAGE
-        # ====================================================
-
-        if (
-            session
-            and session.get("step") == "awaiting_voice"
-            and "voice" in msg
-        ):
-
-            file_id = msg["voice"]["file_id"]
-
-            voice_bytes = download_telegram_file(
-                file_id
-            )
-
-            transcript = transcribe_voice_note(
-                voice_bytes
-            )
-
-            parsed = parse_transaction_text(
-                transcript
-            )
-
-            send_reply(
-                chat_id,
-                f'🎤 Heard: "{transcript}"'
-            )
-
-            send_reply(
-                chat_id,
-                format_structured_reply(
-                    parsed,
-                    "🎤 Voice"
-                )
-            )
-
-            log_and_continue(
-                chat_id,
-                parsed["category"],
-                parsed["amount"],
-                parsed["type"],
-                source="voice",
-                description=parsed.get("description")
-            )
-
+        if step == "awaiting_voice" and "voice" in msg:
+            handle_voice(chat_id, lang, msg)
             return "OK", 200
-
-        # ====================================================
-        # NORMAL TEXT TRANSACTION
-        # ====================================================
 
         if "text" in msg:
-
-            parsed = parse_transaction_text(
-                msg["text"]
-            )
-
-            send_reply(
-                chat_id,
-                format_short_reply(parsed)
-            )
-
-            log_and_continue(
-                chat_id,
-                parsed["category"],
-                parsed["amount"],
-                parsed["type"],
-                source="text",
-                description=parsed.get("description")
-            )
-
+            handle_text_transaction(chat_id, lang, text)
             return "OK", 200
-
-        # ====================================================
-        # PHOTO WITHOUT SELECTING PHOTO OPTION FIRST
-        # ====================================================
 
         if "photo" in msg:
-
-            show_photo_type_menu(
-                chat_id
-            )
-
-            send_reply(
-                chat_id,
-                "📸 Got your photo!\n\n"
-                "Please choose whether this is "
-                "money received or money spent, "
-                "then resend the receipt photo."
-            )
-
+            show_photo_type_menu(chat_id, lang)
+            send_reply(chat_id, t(lang, "photo_first"))
             return "OK", 200
 
-        # ====================================================
-        # VOICE WITHOUT SELECTING VOICE OPTION FIRST
-        # ====================================================
-
         if "voice" in msg:
-
-            file_id = msg["voice"]["file_id"]
-
-            voice_bytes = download_telegram_file(
-                file_id
-            )
-
-            transcript = transcribe_voice_note(
-                voice_bytes
-            )
-
-            parsed = parse_transaction_text(
-                transcript
-            )
-
-            send_reply(
-                chat_id,
-                f'🎤 Heard: "{transcript}"'
-            )
-
-            send_reply(
-                chat_id,
-                format_structured_reply(
-                    parsed,
-                    "🎤 Voice"
-                )
-            )
-
-            log_and_continue(
-                chat_id,
-                parsed["category"],
-                parsed["amount"],
-                parsed["type"],
-                source="voice",
-                description=parsed.get("description")
-            )
-
+            handle_voice(chat_id, lang, msg)
             return "OK", 200
 
     except Exception as e:
-
-        logger.error(
-            f"Error processing webhook: {e}",
-            exc_info=True
-        )
-
-        send_reply(
-            chat_id,
-            "⚠️ Something went wrong, "
-            "but nothing was lost. "
-            "Please try again."
-        )
-
-        show_main_menu(
-            chat_id
-        )
+        logger.error(f"Error processing webhook: {e}", exc_info=True)
+        lang = LANG_CACHE.get(chat_id, "en")
+        send_reply(chat_id, t(lang, "error"))
+        show_main_menu(chat_id, lang)
 
     return "OK", 200
 
-
-# ============================================================
-# CALLBACK / BUTTON HANDLER
-# ============================================================
 
 def handle_callback(query):
-
     callback_id = query["id"]
-
     chat_id = query["message"]["chat"]["id"]
-
     data = query["data"]
+    answer_callback(callback_id)
 
-    # Tell Telegram that the button click was received
-    answer_callback(
-        callback_id
-    )
+    if data.startswith("lang_"):
+        code = data[len("lang_"):]
+        if code in LANGS:
+            set_language(chat_id, code)
+            LANG_CACHE[chat_id] = code
+            send_reply(chat_id, t(code, "lang_set"))
+            send_reply(chat_id, t(code, "welcome"))
+            show_main_menu(chat_id, code)
+        return "OK", 200
 
-    # ========================================================
-    # CHOOSE CATEGORY
-    # ========================================================
+    lang = get_lang(chat_id)
+    if not lang:
+        show_language_picker(chat_id)
+        return "OK", 200
 
     if data == "menu_options":
-
-        show_category_menu(
-            chat_id
-        )
-
+        show_category_menu(chat_id, lang)
         return "OK", 200
-
-    # ========================================================
-    # RECEIPT PHOTO
-    # ========================================================
 
     if data == "menu_photo":
-
-        show_photo_type_menu(
-            chat_id
-        )
-
+        show_photo_type_menu(chat_id, lang)
         return "OK", 200
-
-    # ========================================================
-    # VOICE MESSAGE
-    # ========================================================
 
     if data == "menu_voice":
-
-        SESSIONS[chat_id] = {
-            "step": "awaiting_voice"
-        }
-
-        send_reply(
-            chat_id,
-            "🎤 Voice Transaction\n\n"
-            "Tell me what happened naturally.\n\n"
-            "Example:\n"
-            "🗣️ \"Spent 500 rupees on food\"\n\n"
-            "I'll understand and record it for you."
-        )
-
+        SESSIONS[chat_id] = {"step": "awaiting_voice"}
+        send_reply(chat_id, t(lang, "voice_prompt"))
         return "OK", 200
 
-    # ========================================================
-    # PHOTO TYPE
-    # ========================================================
-
-    if data in (
-        "phototype_inflow",
-        "phototype_outflow"
-    ):
-
-        tx_type = (
-            "inflow"
-            if data == "phototype_inflow"
-            else "outflow"
-        )
-
-        SESSIONS[chat_id] = {
-            "step": "awaiting_photo",
-            "photo_type": tx_type
-        }
-
-        if tx_type == "inflow":
-
-            send_reply(
-                chat_id,
-                "📈 Money Received selected.\n\n"
-                "Now send the receipt/photo showing "
-                "the money you received."
-            )
-
-        else:
-
-            send_reply(
-                chat_id,
-                "📉 Money Spent selected.\n\n"
-                "Now send the receipt/bill photo."
-            )
-
+    if data in ("phototype_inflow", "phototype_outflow"):
+        tx_type = "inflow" if data == "phototype_inflow" else "outflow"
+        SESSIONS[chat_id] = {"step": "awaiting_photo", "photo_type": tx_type}
+        send_reply(chat_id, t(lang, "photo_in" if tx_type == "inflow" else "photo_out"))
         return "OK", 200
 
-    # ========================================================
-    # GET CURRENT SESSION
-    # ========================================================
-
-    session = SESSIONS.get(
-        chat_id
-    )
-
-    if not session:
+    state = SESSIONS.get(chat_id)
+    if not state:
         return "OK", 200
 
-    # ========================================================
-    # CATEGORY BUTTON
-    # ========================================================
-
-    if (
-        data.startswith("cat_")
-        and session.get("step") == "category"
-    ):
-
-        category = data[
-            len("cat_"):
-        ]
-
-        label, tx_type = CATEGORY_CONFIG[
-            category
-        ]
-
-        # ----------------------------------------------------
-        # OTHERS
-        # ----------------------------------------------------
+    if data.startswith("cat_") and state.get("step") == "category":
+        category = data[len("cat_"):]
+        if category not in CATEGORY_CONFIG:
+            return "OK", 200
+        _, tx_type = CATEGORY_CONFIG[category]
 
         if category == "Others":
-
-            session["step"] = "others_text"
-
-            send_reply(
-                chat_id,
-                "📝 Others selected.\n\n"
-                "Please describe the transaction "
-                "in a full sentence.\n\n"
-                "Example:\n"
-                "💬 \"Spent ₹750 on repairing the printer\""
-            )
-
-        # ----------------------------------------------------
-        # NORMAL CATEGORY
-        # ----------------------------------------------------
-
+            state["step"] = "others_text"
+            send_reply(chat_id, t(lang, "others_prompt"))
         else:
-
-            session["step"] = "amount"
-
-            session["category"] = category
-
-            session["type"] = tx_type
-
-            if tx_type == "inflow":
-
-                arrow = "📈 Money coming IN"
-
-            else:
-
-                arrow = "📉 Money going OUT"
-
-            send_reply(
-                chat_id,
-                f"{label}\n\n"
-                f"{arrow}\n\n"
-                "💰 Enter the amount in ₹:\n\n"
-                "Example: 5000"
-            )
-
+            state.update(step="amount", category=category, type=tx_type)
+            send_reply(chat_id, t(
+                lang, "amount_prompt",
+                label=cat_label(lang, category),
+                direction=t(lang, "dir_in" if tx_type == "inflow" else "dir_out"),
+            ))
         return "OK", 200
 
     return "OK", 200
 
 
-# ============================================================
-# START FLASK SERVER
-# ============================================================
-
 if __name__ == "__main__":
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            5000
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
